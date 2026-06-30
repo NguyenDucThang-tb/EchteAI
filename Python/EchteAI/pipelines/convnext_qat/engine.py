@@ -11,7 +11,7 @@ def move_targets(targets, device):
 
 def train_one_epoch(
     model, loader, optimizer, device, grad_clip_norm=0.0, print_frequency=20,
-    iteration_scheduler=None,
+    iteration_scheduler=None, max_steps=None,
 ):
     model.train()
     total_loss = 0.0
@@ -39,7 +39,14 @@ def train_one_epoch(
                 f"lr={learning_rate:.3e} elapsed={elapsed:.1f}s",
                 flush=True,
             )
-    return {"loss": total_loss / max(len(loader), 1), "seconds": time.perf_counter() - started}
+        if max_steps is not None and step >= int(max_steps):
+            break
+    completed_steps = min(len(loader), int(max_steps)) if max_steps is not None else len(loader)
+    return {
+        "loss": total_loss / max(completed_steps, 1),
+        "seconds": time.perf_counter() - started,
+        "steps": completed_steps,
+    }
 
 
 @torch.inference_mode()
