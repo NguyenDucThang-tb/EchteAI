@@ -1,13 +1,9 @@
 from ultralytics import YOLO
 from ultralytics.data.augment import LetterBox
 import os
-import cv2
 import numpy as np
 import torch
 import logging
-from glob import glob
-from onnxruntime.quantization import CalibrationDataReader
-import onnx
 import onnxruntime as ort
 
 def setup_yolo(model_name="yolo11x.pt", pretrained=True):
@@ -64,49 +60,6 @@ def predict_yolo_onnx_tensor(tensor: torch.Tensor = torch.rand(2, 3, 640, 640),
         logging.info(f"Output[{i}] shape: {out.shape}")
     return outputs
 
-class YoloCalibrationDataLoader(CalibrationDataReader):
-    def __init__(self, image_dir, model_path, batch_size=8, num_batches=5, image_size=(640, 640)):
-        self.image_paths = sorted(glob(os.path.join(image_dir, "*.*")))
-        self.batch_size = batch_size
-        self.num_batches = num_batches
-        self.image_size = image_size
-        self.transform = LetterBox(new_shape=image_size)
-        self.index = 0
-
-        model = onnx.load(model_path)
-        self.input_name = model.graph.input[0].name
-
-    def __len__(self):
-        return min(self.num_batches, (len(self.image_paths) + self.batch_size - 1) // self.batch_size)
-
-    def reset(self):
-        self.index = 0
-
-    def get_next(self):
-        if self.index >= len(self.image_paths) or self.index // self.batch_size >= self.num_batches:
-            return None
-
-        batch_paths = self.image_paths[self.index:self.index + self.batch_size]
-        processed = []
-
-        for path in batch_paths:
-            img = cv2.imread(path)
-            if img is None:
-                continue
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            resized = self.transform(image=img)
-            resized = resized.astype(np.float32) / 255.0
-            resized = resized.transpose(2, 0, 1)  # HWC -> CHW
-            processed.append(resized)
-
-        self.index += self.batch_size
-
-        if processed:
-            batch_np = np.stack(processed, axis=0).astype(np.float32)
-            return {self.input_name: batch_np}
-        else:
-            return None
-        
 from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as T

@@ -18,10 +18,13 @@ setup(
         "numpy",
         "torch",
         "torchvision",
+        "Pillow",
+        "PyYAML",
         "opencv-python",
         "matplotlib",
         "onnx"
     ],
+    extras_require={"coco": ["pycocotools"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

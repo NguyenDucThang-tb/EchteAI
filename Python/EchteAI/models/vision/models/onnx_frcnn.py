@@ -5,45 +5,7 @@ import numpy as np
 import re
 import os
 import torch.nn.functional as F
-from onnxruntime.quantization import quantize_static, CalibrationDataReader, QuantType
 import logging
-
-class FECalibrationDataReader(CalibrationDataReader):
-    def __init__(self, data_loader, transform, input_name, num_batches=8):
-        self.input_name = input_name
-        self.inputs = []
-
-        count = 0
-        for images, _ in data_loader:
-            if count >= num_batches:
-                break
-
-            img_list, _ = transform(images)
-            tensors = img_list.tensors
-
-            self.inputs.append({input_name: tensors.cpu().numpy()})
-            count += 1
-
-        self.iterator = iter(self.inputs)
-
-    def get_next(self):
-        return next(self.iterator, None)
-    
-def quantize_feature_extractor(fe_onnx_path, data_loader, transform, output_path, num_batches=8):
-    model = onnx.load(fe_onnx_path)
-    input_name = model.graph.input[0].name
-
-    dr = FECalibrationDataReader(data_loader, transform, input_name, num_batches=num_batches)
-
-    quantize_static(
-        model_input=fe_onnx_path,
-        model_output=output_path,
-        calibration_data_reader=dr,
-        weight_type=QuantType.QInt8,
-        activation_type=QuantType.QInt8,
-        quant_format="QDQ",
-    )
-    print(f"FE quantized model saved to: {output_path}")
 
 def onnx_conv_outputs_from_batch(
     model_path,

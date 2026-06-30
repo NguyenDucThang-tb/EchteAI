@@ -7,8 +7,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import cv2
-import torch.ao.quantization as quant
-import EchteAI.models.quantized.quantized_resnet50 as qresnet
 import time
 import matplotlib.pyplot as plt
 from torchvision.models.detection.image_list import ImageList
@@ -16,15 +14,9 @@ from collections import OrderedDict
 import onnxruntime as ort
 import torchvision.transforms as T
 import torch.nn.functional as F
-from onnxruntime.quantization import quantize_static, CalibrationDataReader, QuantType
 import onnx
 
-from quark.onnx import ModelQuantizer, PowerOfTwoMethod, QuantType, QuantFormat
-from quark.onnx.quantization.config.config import Config, QuantizationConfig
-import quark
-
 import re
-from glob import glob
 
 from ultralytics import YOLO
 from ultralytics.data.augment import LetterBox
@@ -254,85 +246,6 @@ def run_predictions_fasterrcnn(model, data_loader, device, dataset, output_folde
                 cv2.imwrite(output_path, image_bgr)
             logging.info(f"Batch {batch_idx} processed in {batch_time:.4f} seconds.")
 
-def quantize_dynamic(model):
-    model.to("cpu")
-    model.eval()
-
-    model_quantized = torch.ao.quantization.quantize_dynamic(model)
-    logging.info("Dynamic quantization applied (qint8_dynamic).")
-    
-    model_quantized.eval()
-    return model_quantized.to("cpu")
-
-def quantize_fasterrcnn(model_fp32, data_loader, number_of_batches=2):
-    model_fp32.eval().to("cpu")
-    logging.info("Loading quantized backbone...")
-
-    quantized_resnet = qresnet.quantized_resnet50()
-    resnet_state_dict = model_fp32.backbone.body.state_dict()
-    quantized_resnet.load_state_dict(resnet_state_dict, strict=False)
-    quantized_resnet.eval()
-
-    activation_observer = quant.HistogramObserver.with_args(dtype=torch.quint8, quant_min=0, quant_max=255)
-    weight_observer = quant.default_per_channel_weight_observer
-    quantized_resnet.qconfig = quant.QConfig(
-        activation=activation_observer,
-        weight=weight_observer
-    )
-
-    logging.info("Calibrate quantized backbone...")
-
-    quant.prepare(quantized_resnet, inplace=True)
-
-    with torch.no_grad():
-        for batch_idx, (images, _) in enumerate(data_loader):
-            if batch_idx >= number_of_batches and number_of_batches >= 0:
-                break
-
-            transformed_batch, _ = model_fp32.transform(images)
-
-            if isinstance(transformed_batch, torchvision.models.detection.image_list.ImageList):
-                images_tensor = transformed_batch.tensors
-            else:
-                raise TypeError(f"Nem megfelelő transzformált batch formátum: {type(transformed_batch)}")
-
-            quantized_resnet(images_tensor)
-
-    quant.convert(quantized_resnet, inplace=True)
-    quantized_resnet.eval()
-
-    import copy
-    model_quantized = copy.deepcopy(model_fp32)
-    model_quantized.backbone.body = quantized_resnet
-    model_quantized.eval()
-
-    logging.info("Loaded quantized backbone.")
-
-    return model_quantized
-
-def backbone_cnn_layers_outputs(model_quantized, image=torch.randn(1000, 500)):
-    hooks = []
-    outputs = {}
-    
-    for name, layer in model_quantized.backbone.body.named_modules():
-        if isinstance(layer, (torch.ao.nn.quantized.Conv2d)):
-            hook = layer.register_forward_hook(
-                lambda m, i, o, name=name: outputs.update({name: torch.dequantize(o)})
-            )
-            hooks.append(hook)
-        elif isinstance(layer, (torch.nn.Conv2d)):
-            hook = layer.register_forward_hook(
-                lambda m, i, o, name=name: outputs.update({name: o})
-            )
-            hooks.append(hook)
-    
-    output = model_quantized(image.unsqueeze(0))
-    
-    for hook in hooks:
-        hook.remove()
-
-    return outputs
-
 def absolute_differences(outputs1, outputs2):
     abs_diffs = {}
     for key in outputs1:
@@ -552,10 +465,10 @@ def compare_models_visual(model1, model2, data_loader, device, dataset, output_f
         hooks = []
 
         def register_hooks(module, name):
-            if isinstance(module, (torch.nn.Conv2d, torch.ao.nn.quantized.Conv2d)):
+            if isinstance(module, torch.nn.Conv2d):
                 hooks.append(
                     module.register_forward_hook(
-                        lambda m, i, o: features.update({name: torch.dequantize(o) if hasattr(o, "dequantize") else o})
+                        lambda m, i, o: features.update({name: o})
                     )
                 )
 
@@ -850,49 +763,6 @@ class ONNXFasterRCNNWrapper(torch.nn.Module):
             results.append(result)
         return results
 
-class FeatureExtractorCalibrationDataReader(CalibrationDataReader):
-    def __init__(self, data_loader, input_name, input_shape, num_batches):
-        self.input_name = input_name
-        self.input_shape = input_shape
-        self.inputs = []
-
-        bs, c, h, w = input_shape
-        count = 0
-        for images, _ in data_loader:
-            if count >= num_batches:
-                break
-            if len(images) < bs:
-                continue 
-            batch = torch.stack([
-                F.interpolate(img.unsqueeze(0), size=(h, w), mode="bilinear", align_corners=False).squeeze(0)
-                for img in images[:bs]
-            ])
-            self.inputs.append({input_name: batch.numpy()})
-            count += 1
-
-        self.input_iter = iter(self.inputs)
-
-    def get_next(self):
-        return next(self.input_iter, None)
-
-def quantize_onnx_static(onnx_model_path, data_loader, input_shape=(2, 3, 375, 1242), num_batches=8):
-    model = onnx.load(onnx_model_path)
-    input_name = model.graph.input[0].name
-    base, ext = os.path.splitext(onnx_model_path)
-    quantized_model_path = base + "_int8" + ext
-    dr = FeatureExtractorCalibrationDataReader(data_loader, input_name, input_shape, num_batches)
-    quantize_static(
-        model_input=onnx_model_path,
-        model_output=quantized_model_path,
-        calibration_data_reader=dr,
-        quant_format="QDQ",
-        weight_type=QuantType.QInt8,
-        activation_type=QuantType.QInt8,
-    )
-    logging.info(f"Quantized modell saved succesfully: {quantized_model_path}")
-
-
-
 def onnx_conv_outputs_from_batch(model_path, input_tensor, pattern=r".*conv.*"):
     model = onnx.load(model_path)
     conv_outputs = []
@@ -970,145 +840,6 @@ def predict_yolo_onnx_tensor(tensor: torch.Tensor = torch.rand(2, 3, 640, 640),
         logging.info(f"Output[{i}] shape: {out.shape}")
     return outputs
 
-
-class YoloCalibrationDataLoader(CalibrationDataReader):
-    def __init__(self, image_dir, model_path, batch_size=8, num_batches=5, image_size=(640, 640)):
-        self.image_paths = sorted(glob(os.path.join(image_dir, "*.*")))
-        self.batch_size = batch_size
-        self.num_batches = num_batches
-        self.image_size = image_size
-        self.transform = LetterBox(new_shape=image_size)
-        self.index = 0
-
-        model = onnx.load(model_path)
-        self.input_name = model.graph.input[0].name
-
-    def __len__(self):
-        return min(self.num_batches, (len(self.image_paths) + self.batch_size - 1) // self.batch_size)
-
-    def reset(self):
-        self.index = 0
-
-    def get_next(self):
-        if self.index >= len(self.image_paths) or self.index // self.batch_size >= self.num_batches:
-            return None
-
-        batch_paths = self.image_paths[self.index:self.index + self.batch_size]
-        processed = []
-
-        for path in batch_paths:
-            img = cv2.imread(path)
-            if img is None:
-                continue
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            resized = self.transform(image=img)
-            resized = resized.astype(np.float32) / 255.0
-            resized = resized.transpose(2, 0, 1)  # HWC -> CHW
-            processed.append(resized)
-
-        self.index += self.batch_size
-
-        if processed:
-            batch_np = np.stack(processed, axis=0).astype(np.float32)
-            return {self.input_name: batch_np}
-        else:
-            return None
-        
-def quantize_onnx_model_calibdl(model_path, calib_data_loader, quantized_model_path, quantization_dtype="int16"):
-    if quantization_dtype == "int8":
-        weight_type = QuantType.QInt8
-        activation_type = QuantType.QInt8
-    else:
-        weight_type = QuantType.QInt16
-        activation_type = QuantType.QInt16
-
-    quantized_model = quantize_static(
-        model_input=model_path,
-        model_output=quantized_model_path,
-        weight_type=weight_type,
-        activation_type=activation_type,
-        calibration_data_reader=calib_data_loader
-    )
-
-    logging.info(f"Quantization ({quantization_dtype.upper()}) successful: {quantized_model_path}")    
-
-def quantize_onnx_model_calibdl_int8(model_path, calib_data_loader, quantized_model_path):
-    quantized_model = quantize_static(
-        model_input=model_path,
-        model_output=quantized_model_path,
-        weight_type=QuantType.QInt8,
-        activation_type=QuantType.QInt8,
-        calibration_data_reader=calib_data_loader
-    )
-    
-    logging.info(f"Quantization is successful: {quantized_model_path}")
-
-
-from quark.onnx import ModelQuantizer
-from quark.onnx.quantization.config import Config, get_default_config
-
-def quantize_yolo_model_with_quark(
-    model_path: str = "self_yolo11s.onnx",
-    image_dir: str = "downloads/yolo_dataset/images/train",
-    output_path: str = "self_yolo11x_quark_int8.onnx",
-    batch_size: int = 1,
-    num_batches: int = 32,
-    image_size: tuple = (640, 640),
-    quant_preset: str = "INT8_CNN_DEFAULT",
-    device: str = "cpu"
-):
-    loader = YoloCalibrationDataLoader(
-        image_dir=image_dir,
-        model_path=model_path,
-        batch_size=batch_size,
-        num_batches=num_batches,
-        image_size=image_size
-    )
-
-    quant_config = get_default_config(quant_preset)
-
-    if device.lower() == "cuda":
-        quant_config.execution_providers = ["CUDAExecutionProvider"]
-    else:
-        quant_config.execution_providers = ["CPUExecutionProvider"]
-
-    config = Config(global_quant_config=quant_config)
-    quantizer = ModelQuantizer(config)
-    quantizer.quantize_model(model_path, output_path, loader)
-
-    print(f"[✓] Quantization is complete: {output_path} (device: {device})")
-
-def quantize_yolo_model_with_quark_adaquant(
-    model_path: str = "self_yolo11s.onnx",
-    image_dir: str = "downloads/yolo_dataset/images/train",
-    output_path: str = "self_yolo11_quark_int16.onnx",
-    batch_size: int = 1,
-    num_batches: int = 1,
-    image_size: tuple = (640, 640),
-    quant_preset: str = "INT16_CNN_ACCURATE"
-):
-
-    loader = YoloCalibrationDataLoader(
-        image_dir=image_dir,
-        model_path=model_path,
-        batch_size=batch_size,
-        num_batches=num_batches,
-        image_size=image_size
-    )
-
-    quant_config = get_default_config(quant_preset)
-    quant_config.extra_options["FastFinetune"]["OptimAlgorithm"] = "adaquant"
-    config = Config(global_quant_config=quant_config)
-
-    quantizer = ModelQuantizer(config)
-    
-    quantizer.quantize_model(
-        model_path,
-        output_path,
-        loader
-    )
-
-    print(f"[✓] Quantization is successful: {output_path}")
 
 def visualize_onnx_cnn_outputs(model_path, input_tensor, output_folder="outputs", filename_prefix="activation", vmin=None, vmax=None, depth=-1, layer=None):
     os.makedirs(output_folder, exist_ok=True)

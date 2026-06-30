@@ -196,10 +196,10 @@ def compare_models_visual(model1, model2, data_loader, device, dataset, output_f
         hooks = []
 
         def register_hooks(module, name):
-            if isinstance(module, (torch.nn.Conv2d, torch.ao.nn.quantized.Conv2d)):
+            if isinstance(module, torch.nn.Conv2d):
                 hooks.append(
                     module.register_forward_hook(
-                        lambda m, i, o: features.update({name: torch.dequantize(o) if hasattr(o, "dequantize") else o})
+                        lambda m, i, o: features.update({name: o})
                     )
                 )
 

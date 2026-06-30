@@ -11,6 +11,22 @@ import torch.nn.functional as F
 from collections import OrderedDict
 from torchvision.models.detection.image_list import ImageList
 
+
+def build_weights_only_path(model_path):
+    model_path = os.fspath(model_path)
+    base, ext = os.path.splitext(model_path)
+    if not ext:
+        ext = ".pth"
+    return f"{base}_weights{ext}"
+
+
+def build_epoch_checkpoint_path(model_path, epoch_number):
+    model_path = os.fspath(model_path)
+    base, ext = os.path.splitext(model_path)
+    if not ext:
+        ext = ".pth"
+    return f"{base}_epoch_{epoch_number}{ext}"
+
 def setup_fasterrcnn(dataset=None, backbone="resnet50"):
     model_choices = {
         "resnet50": (fasterrcnn_resnet50_fpn, FasterRCNN_ResNet50_FPN_Weights.DEFAULT),
@@ -45,7 +61,8 @@ def compute_iou_fasterrcnn(boxA, boxB):
     return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
 
 def compute_metrics_fasterrcnn(data_loader, model, device, iou_threshold=0.5, score_threshold=0.5):
-    #model.eval()
+    was_training = model.training
+    model.eval()
     total_gt = 0
     total_tp = 0
     total_pred = 0
@@ -86,6 +103,8 @@ def compute_metrics_fasterrcnn(data_loader, model, device, iou_threshold=0.5, sc
                         matched[best_idx] = True
                         total_tp += 1
                         iou_list.append(best_iou)
+    if was_training:
+        model.train()
     accuracy = total_tp / total_gt if total_gt > 0 else 0
     precision = total_tp / total_pred if total_pred > 0 else 0
     mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0
@@ -131,17 +150,43 @@ def compute_batch_metrics_fasterrcnn(targets, predictions, iou_threshold=0.5, sc
     mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0
     return {"accuracy": accuracy, "precision": precision, "mean_iou": mean_iou}
 
-def train_fasterrcnn(model, train_loader, val_loader, device, num_epochs, model_path="model.pth"):
+def train_fasterrcnn(model, train_loader, val_loader, device, num_epochs, model_path="model.pth", max_train_batches=None):
+    if not model_path or not str(model_path).strip():
+        raise ValueError("model_path is empty. Provide a valid checkpoint path, for example ./model_fasterrcnn_resnet50_kitti.pth")
+    model_path = os.fspath(model_path)
+    weights_only_path = build_weights_only_path(model_path)
+    model_dir = os.path.dirname(model_path)
+    if model_dir:
+        os.makedirs(model_dir, exist_ok=True)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.00001)
+    start_epoch = 0
+
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        logging.info(f"Loaded saved model from {model_path}.")
-    else:
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.00001)
+        checkpoint = torch.load(model_path, map_location=device)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            start_epoch = int(checkpoint.get("epoch", 0))
+            logging.info(f"Resuming training from epoch {start_epoch + 1} using checkpoint {model_path}.")
+        else:
+            model.load_state_dict(checkpoint)
+            logging.info(f"Loaded saved model weights from {model_path}. Starting training from epoch 1.")
+
+    if start_epoch >= num_epochs:
+        logging.info("Checkpoint already covers %d epochs. Skipping training.", start_epoch)
+        return model
+
+    if start_epoch < num_epochs:
         logging.info("Training started.")
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, num_epochs):
             model.train()
             running_loss = 0
+            processed_batches = 0
             for batch_idx, (images, targets) in enumerate(train_loader):
+                if max_train_batches is not None and batch_idx >= max_train_batches:
+                    break
                 images = [img.to(device) for img in images]
                 targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
                 loss_dict = model(images, targets)
@@ -150,17 +195,21 @@ def train_fasterrcnn(model, train_loader, val_loader, device, num_epochs, model_
                 losses.backward()
                 optimizer.step()
                 running_loss += losses.item()
+                processed_batches += 1
                 with torch.no_grad():
                     model.eval()
                     predictions = model(images)
                     batch_metrics = compute_batch_metrics_fasterrcnn(targets, predictions)
                     model.train()
-                logging.info(
-                    f"Epoch {epoch+1}, Batch {batch_idx+1}, Loss: {losses.item():.4f}, "
-                    f"Acc: {batch_metrics['accuracy']:.4f}, Prec: {batch_metrics['precision']:.4f}, "
-                    f"mIoU: {batch_metrics['mean_iou']:.4f}"
-                )
-            avg_loss = running_loss / len(train_loader)
+                if (batch_idx + 1) % 100 == 0:
+                    logging.info(
+                        f"Epoch {epoch+1}, Batch {batch_idx+1}, Loss: {losses.item():.4f}, "
+                        f"Acc: {batch_metrics['accuracy']:.4f}, Prec: {batch_metrics['precision']:.4f}, "
+                        f"mIoU: {batch_metrics['mean_iou']:.4f}"
+                    )
+            if processed_batches == 0:
+                raise ValueError("No training batches were processed. Check max_train_batches and dataloader size.")
+            avg_loss = running_loss / processed_batches
             train_metrics = compute_metrics_fasterrcnn(train_loader, model, device)
             val_metrics = compute_metrics_fasterrcnn(val_loader, model, device)
             logging.info(
@@ -169,8 +218,35 @@ def train_fasterrcnn(model, train_loader, val_loader, device, num_epochs, model_
                 f"Train mIoU: {train_metrics['mean_iou']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}, "
                 f"Val Prec: {val_metrics['precision']:.4f}, Val mIoU: {val_metrics['mean_iou']:.4f}"
             )
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                model_path,
+            )
+            torch.save(model.state_dict(), weights_only_path)
+            epoch_checkpoint_path = build_epoch_checkpoint_path(model_path, epoch + 1)
+            epoch_weights_only_path = build_weights_only_path(epoch_checkpoint_path)
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                epoch_checkpoint_path,
+            )
+            torch.save(model.state_dict(), epoch_weights_only_path)
+            logging.info(
+                "Saved epoch %d latest checkpoint to %s, latest weights-only file to %s, epoch checkpoint to %s, and epoch weights-only file to %s",
+                epoch + 1,
+                model_path,
+                weights_only_path,
+                epoch_checkpoint_path,
+                epoch_weights_only_path,
+            )
         logging.info("Training finished.")
-        torch.save(model.state_dict(), model_path)
     return model
 
 def run_predictions_fasterrcnn(model, data_loader, device, dataset, output_folder, evaluate=False, num_batches = -1, batch_size=None, score_threshold=0.5):

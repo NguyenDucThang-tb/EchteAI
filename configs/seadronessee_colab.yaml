@@ -1,0 +1,97 @@
+seed: 42
+device: auto
+
+dataset:
+  train_images: /content/seadronessee/images/train
+  train_annotations: /content/seadronessee/annotations/instances_train.json
+  val_images: /content/seadronessee/images/val
+  val_annotations: /content/seadronessee/annotations/instances_val.json
+  # Official test labels are withheld. Use validation for local metrics/benchmark.
+  test_images: /content/seadronessee/images/val
+  test_annotations: /content/seadronessee/annotations/instances_val.json
+  ignore_category_ids: [0]
+  num_classes: 6
+  workers: 2
+
+augmentation:
+  horizontal_flip_probability: 0.5
+  brightness: 0.1
+  contrast: 0.1
+  saturation: 0.05
+  hue: 0.02
+
+model:
+  backbone: convnext_tiny
+  pretrained_backbone: true
+  trainable_backbone_layers: 4
+  fpn_out_channels: 256
+  # Safe default for a Colab T4 (15 GB). A100 users can try [1024, 1280], max 2048.
+  min_size: 960
+  train_min_sizes: [800, 896, 960]
+  max_size: 1600
+  anchor_sizes: [8, 16, 32, 64, 128]
+  aspect_ratios: [0.5, 1.0, 2.0]
+  rpn_pre_nms_top_n_train: 2000
+  rpn_pre_nms_top_n_test: 1000
+  rpn_post_nms_top_n_train: 1000
+  rpn_post_nms_top_n_test: 1000
+
+training:
+  batch_size: 1
+  fp32_epochs: 30
+  qat_epochs: 11
+  optimizer: adamw
+  fp32_lr: 0.0001
+  qat_lr: 0.00001
+  weight_decay: 0.0001
+  lr_step_size: 10
+  lr_gamma: 0.1
+  grad_clip_norm: 10.0
+  warmup_iterations: 1000
+  print_frequency: 50
+
+quantization:
+  variant: M3
+  backend: x86
+  calibration_images: 512
+  weight_only_warmup_epochs: 2
+  observer_freeze_epochs: 3
+  phase_learning_rates:
+    weight_only: 0.0001
+    full: 0.00005
+    frozen: 0.00001
+  variant_modules:
+    M0: []
+    M1: [backbone.convnext]
+    M2: [backbone.convnext, backbone.fpn]
+    M3: [backbone.convnext, backbone.fpn, rpn.shared_conv, rpn.classification]
+    M4: [backbone.convnext, backbone.fpn, rpn.shared_conv, rpn.classification, rpn.bbox]
+  quantized_modules:
+    - backbone.convnext
+    - backbone.fpn
+    - rpn.shared_conv
+    - rpn.classification
+  fp32_modules:
+    - transform
+    - convnext.layernorm_gelu_residual
+    - anchor_generator
+    - rpn.bbox_decoder_nms
+    - rpn.bbox_branch
+    - roi_align
+    - roi_heads
+    - final_decode_nms
+
+output:
+  directory: /content/drive/MyDrive/EchteAI/seadronessee_m3
+  fp32_best: /content/drive/MyDrive/EchteAI/seadronessee_m3/fp32_best.pt
+  fp32_last: /content/drive/MyDrive/EchteAI/seadronessee_m3/fp32_last.pt
+  qat_best: /content/drive/MyDrive/EchteAI/seadronessee_m3/qat_best.pt
+  qat_last: /content/drive/MyDrive/EchteAI/seadronessee_m3/qat_last.pt
+  int8_model: /content/drive/MyDrive/EchteAI/seadronessee_m3/selective_int8.pt
+  evaluation_json: /content/drive/MyDrive/EchteAI/seadronessee_m3/evaluation.json
+  benchmark_json: /content/drive/MyDrive/EchteAI/seadronessee_m3/benchmark.json
+
+benchmark:
+  warmup_iterations: 10
+  iterations: 50
+  num_threads: 1

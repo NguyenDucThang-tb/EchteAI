@@ -1,0 +1,94 @@
+seed: 42
+device: auto
+
+dataset:
+  train_images: data/coco/train2017
+  train_annotations: data/coco/annotations/instances_train2017.json
+  val_images: data/coco/val2017
+  val_annotations: data/coco/annotations/instances_val2017.json
+  test_images: data/coco/test2017
+  test_annotations: data/coco/annotations/instances_test2017.json
+  num_classes: 81                 # includes background
+  workers: 4
+
+augmentation:
+  horizontal_flip_probability: 0.5
+  brightness: 0.1
+  contrast: 0.1
+  saturation: 0.05
+  hue: 0.02
+
+model:
+  backbone: convnext_tiny          # convnext_tiny or convnext_small
+  pretrained_backbone: true
+  trainable_backbone_layers: 4
+  fpn_out_channels: 256
+  min_size: 640
+  train_min_sizes: [512, 576, 640]  # random scale during train; 640 during eval
+  max_size: 1024
+  anchor_sizes: [16, 32, 64, 128, 256]
+  aspect_ratios: [0.5, 1.0, 2.0]
+  rpn_pre_nms_top_n_train: 2000
+  rpn_pre_nms_top_n_test: 1000
+  rpn_post_nms_top_n_train: 1000
+  rpn_post_nms_top_n_test: 1000
+
+training:
+  batch_size: 2
+  fp32_epochs: 24
+  qat_epochs: 8
+  optimizer: adamw
+  fp32_lr: 0.0001
+  qat_lr: 0.00001
+  weight_decay: 0.0001
+  lr_step_size: 8
+  lr_gamma: 0.1
+  grad_clip_norm: 10.0
+  warmup_iterations: 500
+  print_frequency: 20
+
+quantization:
+  variant: M3
+  backend: x86
+  calibration_images: 256
+  weight_only_warmup_epochs: 2
+  observer_freeze_epochs: 2
+  phase_learning_rates:
+    weight_only: 0.0001
+    full: 0.00005
+    frozen: 0.00001
+  variant_modules:
+    M0: []
+    M1: [backbone.convnext]
+    M2: [backbone.convnext, backbone.fpn]
+    M3: [backbone.convnext, backbone.fpn, rpn.shared_conv, rpn.classification]
+    M4: [backbone.convnext, backbone.fpn, rpn.shared_conv, rpn.classification, rpn.bbox]
+  quantized_modules:
+    - backbone.convnext
+    - backbone.fpn
+    - rpn.shared_conv
+    - rpn.classification
+  fp32_modules:
+    - transform
+    - convnext.layernorm_gelu_residual
+    - anchor_generator
+    - rpn.bbox_decoder_nms
+    - rpn.bbox_branch
+    - roi_align
+    - roi_heads
+    - final_decode_nms
+
+output:
+  directory: outputs/convnext_qat
+  fp32_best: outputs/convnext_qat/fp32_best.pt
+  fp32_last: outputs/convnext_qat/fp32_last.pt
+  qat_best: outputs/convnext_qat/qat_best.pt
+  qat_last: outputs/convnext_qat/qat_last.pt
+  int8_model: outputs/convnext_qat/selective_int8.pt
+  evaluation_json: outputs/convnext_qat/evaluation.json
+  benchmark_json: outputs/convnext_qat/benchmark.json
+
+benchmark:
+  warmup_iterations: 50
+  iterations: 300
+  num_threads: 1
