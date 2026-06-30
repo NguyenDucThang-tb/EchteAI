@@ -56,6 +56,7 @@ def native_detection_metrics(predictions, targets, score_threshold=0.5):
     thresholds = [0.5 + 0.05 * index for index in range(10)]
     aps = [_ap_at_iou(predictions, targets, threshold) for threshold in thresholds]
     tp = fp = total_gt = 0
+    matched_ious = []
     for prediction, target in zip(predictions, targets):
         keep = prediction["scores"] >= score_threshold
         pred_boxes, pred_labels = prediction["boxes"][keep], prediction["labels"][keep]
@@ -67,12 +68,17 @@ def native_detection_metrics(predictions, targets, score_threshold=0.5):
             values = ious[index].clone()
             values[~candidates] = -1
             if len(values) and values.max() >= 0.5:
-                matched[values.argmax()] = True
+                best_index = values.argmax()
+                matched[best_index] = True
+                matched_ious.append(float(values[best_index]))
                 tp += 1
             else:
                 fp += 1
     precision = tp / max(tp + fp, 1)
     recall = tp / max(total_gt, 1)
+    false_negatives = max(total_gt - tp, 0)
+    detection_accuracy = tp / max(tp + fp + false_negatives, 1)
+    mean_iou = sum(matched_ious) / max(len(matched_ious), 1)
     area_aps = {
         "ap_small": [_ap_at_iou(predictions, targets, threshold, (0, 32**2)) for threshold in thresholds],
         "ap_medium": [_ap_at_iou(predictions, targets, threshold, (32**2, 96**2)) for threshold in thresholds],
@@ -88,6 +94,8 @@ def native_detection_metrics(predictions, targets, score_threshold=0.5):
         **{name: nanmean(values) for name, values in area_aps.items()},
         "precision": precision,
         "recall": recall,
+        "accuracy": detection_accuracy,
+        "mean_iou": mean_iou,
         "f1": 2 * precision * recall / max(precision + recall, 1e-12),
     }
 
