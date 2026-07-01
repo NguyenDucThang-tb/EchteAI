@@ -178,20 +178,39 @@ def rpn_recall(model, loader, device, limits=(100, 300, 1000)):
 
 
 @torch.inference_mode()
-def evaluate_model(model, loader, device, include_rpn=True):
+def evaluate_model(model, loader, device, include_rpn=True, progress_frequency=10):
     model.eval()
     predictions, targets = [], []
+    total_images = len(loader.dataset)
+    processed = 0
+    print(
+        f"evaluation started: target={total_images} images device={device}",
+        flush=True,
+    )
     for images, batch_targets in loader:
         outputs = model([image.to(device) for image in images])
         predictions.extend([{key: value.detach().cpu() for key, value in output.items()} for output in outputs])
         targets.extend([{key: value.detach().cpu() if torch.is_tensor(value) else value for key, value in target.items()} for target in batch_targets])
+        processed += len(images)
+        if (
+            progress_frequency
+            and (processed % progress_frequency < len(images) or processed >= total_images)
+        ):
+            print(
+                f"evaluation progress: {processed}/{total_images} images",
+                flush=True,
+            )
+    print("evaluation inference completed; calculating detection metrics", flush=True)
     metrics = native_detection_metrics(predictions, targets)
     dataset = unwrap_coco_dataset(loader.dataset)
     canonical = _coco_metrics(predictions, targets, dataset)
     if canonical:
         metrics.update(canonical)
     if include_rpn:
+        print("RPN metric evaluation started", flush=True)
         metrics.update(rpn_recall(model, loader, device))
+        print("RPN metric evaluation completed", flush=True)
+    print("evaluation completed", flush=True)
     return metrics
 
 
