@@ -155,6 +155,14 @@ def train_one_epoch_ddp(
     total_loss = 0.0
     started = time.perf_counter()
     for step, (images, targets) in enumerate(loader, 1):
+        if rank == 0 and (step == 1 or (print_frequency and step % print_frequency == 0)):
+            elapsed = time.perf_counter() - started
+            print(
+                f"rank0_step_start={step}/{len(loader)} "
+                f"batch={len(images)} elapsed={elapsed:.1f}s",
+                flush=True,
+            )
+        step_started = time.perf_counter()
         images = [image.to(device, non_blocking=True) for image in images]
         targets = move_targets(targets, device)
         losses = model(images, targets)
@@ -167,12 +175,14 @@ def train_one_epoch_ddp(
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         optimizer.step()
         total_loss += float(loss.detach())
-        if rank == 0 and print_frequency and step % print_frequency == 0:
+        if rank == 0 and (step == 1 or (print_frequency and step % print_frequency == 0)):
             elapsed = time.perf_counter() - started
             learning_rate = optimizer.param_groups[0]["lr"]
+            memory_gb = torch.cuda.max_memory_allocated(device) / 2**30
             print(
                 f"rank0_step={step}/{len(loader)} loss={total_loss / step:.4f} "
-                f"lr={learning_rate:.3e} elapsed={elapsed:.1f}s",
+                f"lr={learning_rate:.3e} step_seconds={time.perf_counter() - step_started:.1f} "
+                f"elapsed={elapsed:.1f}s max_mem={memory_gb:.2f}GB",
                 flush=True,
             )
     return reduce_train_metrics(total_loss, len(loader), time.perf_counter() - started, device)
