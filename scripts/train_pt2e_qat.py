@@ -55,11 +55,16 @@ def main():
     observer_warmup_epochs = int(pt2e_config.get("observer_warmup_epochs", 1))
     observer_freeze_epochs = int(pt2e_config.get("observer_freeze_epochs", 1))
     validate_pt2e_schedule(total_epochs, observer_warmup_epochs, observer_freeze_epochs)
+    validate_after_epoch = bool(
+        config["training"].get("pt2e_validate_after_epoch", True)
+    )
     batch_size = int(config["training"].get("qat_batch_size", 1))
     train_loader = build_coco_loader(config, "train", limit=args.limit, batch_size=batch_size)
-    val_loader = build_coco_loader(
-        config, "val", shuffle=False, limit=args.limit, batch_size=batch_size,
-    )
+    val_loader = None
+    if validate_after_epoch:
+        val_loader = build_coco_loader(
+            config, "val", shuffle=False, limit=args.limit, batch_size=batch_size,
+        )
 
     model = build_fasterrcnn_convnext(config)
     fp32_checkpoint = args.fp32_checkpoint or config["output"]["fp32_best"]
@@ -108,6 +113,18 @@ def main():
             float(config["training"].get("grad_clip_norm", 0)),
             int(config["training"].get("print_frequency", 20)),
         )
+        if not validate_after_epoch:
+            metrics = {"train": train_metrics, "validation_skipped": True}
+            save_checkpoint(
+                last_path, model, optimizer, epoch + 1, metrics,
+                checkpoint_extra(config, best_map),
+            )
+            print(
+                f"Saved PT2E checkpoint without full validation: {last_path}",
+                flush=True,
+            )
+            continue
+
         save_checkpoint(
             last_path, model, optimizer, epoch + 1,
             {"train": train_metrics, "validation_pending": True},
