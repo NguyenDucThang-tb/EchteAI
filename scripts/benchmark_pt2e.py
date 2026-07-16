@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark import benchmark
 from evaluate import load_model
-from pipelines.convnext_qat.checkpoint import model_state_size_mb
+from pipelines.convnext_qat.checkpoint import checkpoint_size_mb, model_state_size_mb
 from pipelines.convnext_qat.config import load_config, validate_dataset_paths
 from pipelines.convnext_qat.data import build_coco_loader
 from pipelines.convnext_qat.metrics import evaluate_model
@@ -31,8 +31,11 @@ def main():
     parser.add_argument("--pt2e-int8-checkpoint", required=True)
     parser.add_argument("--eager-int8-checkpoint")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--images", type=int, default=100, help="images used for accuracy evaluation")
     parser.add_argument("--output")
     args = parser.parse_args()
+    if args.images <= 0:
+        parser.error("--images must be positive")
 
     config = load_config(args.config)
     validate_dataset_paths(config, ("test",))
@@ -46,6 +49,12 @@ def main():
     fp32 = load_model(config, "fp32", args.fp32_checkpoint, torch.device("cpu"))
     results["fp32"] = benchmark(fp32, images, warmup, iterations)
     results["fp32"]["model_size_mb"] = model_state_size_mb(fp32)
+    results["fp32"]["accuracy"] = evaluate_model(
+        fp32,
+        build_coco_loader(config, "test", shuffle=False, limit=args.images, batch_size=1),
+        torch.device("cpu"), include_rpn=False,
+    )
+    results["fp32"]["accuracy_images"] = args.images
     del fp32
     gc.collect()
 
@@ -53,13 +62,21 @@ def main():
         eager = load_model(config, "int8", args.eager_int8_checkpoint, torch.device("cpu"))
         results["eager_m3"] = benchmark(eager, images, warmup, iterations)
         results["eager_m3"]["model_size_mb"] = model_state_size_mb(eager)
+        results["eager_m3"]["accuracy"] = evaluate_model(
+            eager,
+            build_coco_loader(config, "test", shuffle=False, limit=args.images, batch_size=1),
+            torch.device("cpu"), include_rpn=False,
+        )
+        results["eager_m3"]["accuracy_images"] = args.images
         del eager
         gc.collect()
 
     pt2e, artifact = load_pt2e_int8_artifact(args.pt2e_int8_checkpoint, config)
     print("Evaluating converted PT2E INT8 artifact before latency benchmark...", flush=True)
     pt2e_accuracy = evaluate_model(
-        pt2e, build_coco_loader(config, "test", shuffle=False, batch_size=1),
+        pt2e, build_coco_loader(
+            config, "test", shuffle=False, limit=args.images, batch_size=1,
+        ),
         torch.device("cpu"), include_rpn=False,
     )
     pt2e_size = model_state_size_mb(pt2e)
@@ -70,6 +87,10 @@ def main():
     results["pt2e_backbone"]["compiled"] = args.compile
     results["pt2e_backbone"]["accuracy"] = pt2e_accuracy
     results["pt2e_backbone"]["artifact_metadata"] = artifact.get("extra", {})
+    results["pt2e_backbone"]["artifact_file_size_mb"] = checkpoint_size_mb(
+        args.pt2e_int8_checkpoint,
+    )
+    results["pt2e_backbone"]["accuracy_images"] = args.images
     results["pt2e_speedup_vs_fp32"] = (
         results["fp32"]["latency_ms"] / results["pt2e_backbone"]["latency_ms"]
     )

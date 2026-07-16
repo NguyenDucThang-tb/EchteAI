@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import copy
+import io
 import sysconfig
-import warnings
 from collections import OrderedDict
+from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -26,6 +27,42 @@ def _collect_pt2e_fake_quantizers(model):
         module for module in model.modules()
         if required_methods.issubset(dir(module))
     ]
+
+
+def validate_pt2e_schedule(total_epochs, observer_warmup_epochs, observer_freeze_epochs):
+    """Validate a QAT phase schedule before expensive model construction starts."""
+    values = {
+        "total_epochs": int(total_epochs),
+        "observer_warmup_epochs": int(observer_warmup_epochs),
+        "observer_freeze_epochs": int(observer_freeze_epochs),
+    }
+    if values["total_epochs"] <= 0:
+        raise ValueError("PT2E total_epochs must be positive")
+    if values["observer_warmup_epochs"] < 0 or values["observer_freeze_epochs"] < 0:
+        raise ValueError("PT2E observer warmup/freeze epochs cannot be negative")
+    if values["observer_warmup_epochs"] + values["observer_freeze_epochs"] > values["total_epochs"]:
+        raise ValueError("PT2E observer warmup + freeze epochs exceed total epochs")
+    if values["observer_freeze_epochs"] == values["total_epochs"]:
+        raise ValueError(
+            "PT2E cannot freeze observers for every epoch: activation ranges would never be "
+            "calibrated. Set observer_freeze_epochs=0 for a one-epoch smoke run."
+        )
+    return values
+
+
+def pt2e_qat_phase(epoch, total_epochs, observer_warmup_epochs, observer_freeze_epochs):
+    """Return the deterministic QAT phase for a zero-based epoch index."""
+    values = validate_pt2e_schedule(
+        total_epochs, observer_warmup_epochs, observer_freeze_epochs,
+    )
+    epoch = int(epoch)
+    if not 0 <= epoch < values["total_epochs"]:
+        raise ValueError(f"PT2E epoch index {epoch} is outside [0, {values['total_epochs']})")
+    if epoch < values["observer_warmup_epochs"]:
+        return "observer_warmup"
+    if epoch >= values["total_epochs"] - values["observer_freeze_epochs"]:
+        return "frozen"
+    return "full"
 
 
 def _torchao_pt2e():
@@ -75,27 +112,73 @@ class BackboneBodyRegion(nn.Module):
         return tuple(outputs)
 
 
+class _PT2EResNetBottleneck(nn.Module):
+    """ResNet bottleneck with distinct ReLU module sources for PT2E matching.
+
+    torchvision's Bottleneck invokes one ``self.relu`` module three times.
+    TorchAO 0.17 groups those calls into one source partition with multiple
+    outputs, while X86InductorQuantizer's QAT fusion matcher requires exactly
+    one output per partition. Splitting the stateless ReLUs preserves the
+    computation and state-dict names of all weighted layers.
+    """
+
+    def __init__(self, block):
+        super().__init__()
+        self.conv1 = block.conv1
+        self.bn1 = block.bn1
+        self.conv2 = block.conv2
+        self.bn2 = block.bn2
+        self.conv3 = block.conv3
+        self.bn3 = block.bn3
+        self.relu1 = nn.ReLU(inplace=True)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.relu3 = nn.ReLU(inplace=True)
+        self.downsample = block.downsample
+        self.stride = block.stride
+
+    def forward(self, x):
+        identity = x
+        out = self.relu1(self.bn1(self.conv1(x)))
+        out = self.relu2(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out += identity
+        return self.relu3(out)
+
+
+def _split_resnet_bottleneck_relus(module):
+    for name, child in list(module.named_children()):
+        if child.__class__.__name__ == "Bottleneck":
+            setattr(module, name, _PT2EResNetBottleneck(child))
+        else:
+            _split_resnet_bottleneck_relus(child)
+    return module
+
+
 class ResNet50BodyRegion(nn.Module):
     """Explicit ResNet-50 export boundary with cloned C2-C5 outputs."""
 
     def __init__(self, body):
         super().__init__()
         self.stem = body[0]
-        self.layer1 = body[1]
-        self.layer2 = body[2]
-        self.layer3 = body[3]
-        self.layer4 = body[4]
+        self.layer1 = _split_resnet_bottleneck_relus(body[1])
+        self.layer2 = _split_resnet_bottleneck_relus(body[2])
+        self.layer3 = _split_resnet_bottleneck_relus(body[3])
+        self.layer4 = _split_resnet_bottleneck_relus(body[4])
 
     def forward(self, x):
         x = self.stem(x)
-        c2 = self.layer1(x)
-        c3 = self.layer2(c2)
-        c4 = self.layer3(c3)
-        c5 = self.layer4(c4)
-        # Clone stage outputs before returning them so the quantizer sees
-        # single-use graph leaves rather than tensors that are both returned
-        # and consumed by subsequent stages.
-        return (c2.clone(), c3.clone(), c4.clone(), c5.clone())
+        # Put one clone immediately after every stage and feed that clone to
+        # both the next stage and the returned feature tuple. Without this
+        # boundary the last ReLU partition has two external output nodes
+        # (the next stage and the detector output), which makes
+        # X86InductorQuantizer QAT annotation fail for ResNet residual blocks.
+        c2 = self.layer1(x).clone()
+        c3 = self.layer2(c2).clone()
+        c4 = self.layer3(c3).clone()
+        c5 = self.layer4(c4).clone()
+        return (c2, c3, c4, c5)
 
 
 class BackboneBodyFPNRegion(nn.Module):
@@ -249,6 +332,16 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     prepared_model.pt2e_quantized_region = (
         "backbone.body" if scope == "backbone" else "backbone.body+fpn"
     )
+    prepared_model.pt2e_backbone_kind = region_kind
+    prepared_model.pt2e_export_spec = {
+        "example_batch_size": example_batch,
+        "maximum_batch_size": maximum_batch,
+        "minimum_side": minimum_side,
+        "maximum_side": maximum_side,
+        "example_height": example_height,
+        "example_width": example_width,
+        "spatial_divisor": spatial_divisor,
+    }
     if scope == "backbone_fpn":
         # FPN creates additional parity guards. Faster R-CNN must therefore pad
         # its internal ImageList to 64 instead of the default backbone stride.
@@ -278,6 +371,89 @@ def set_pt2e_qat_phase(model, phase):
             module.disable_observer()
             module.enable_fake_quant()
     return len(fake_quantizers)
+
+
+@contextmanager
+def pt2e_observers_disabled(model):
+    """Temporarily freeze PT2E observers during validation/benchmark inference."""
+    fake_quantizers = _collect_pt2e_fake_quantizers(model)
+    states = []
+    for module in fake_quantizers:
+        enabled = getattr(module, "observer_enabled", None)
+        states.append(enabled.detach().clone() if torch.is_tensor(enabled) else None)
+        module.disable_observer()
+    try:
+        yield len(fake_quantizers)
+    finally:
+        for module, enabled in zip(fake_quantizers, states):
+            if enabled is not None:
+                module.observer_enabled.resize_(enabled.shape).copy_(enabled)
+
+
+def synchronize_pt2e_observers(model):
+    """Merge min/max observer ranges across DDP ranks before rank-0 validation/save."""
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return 0
+    synchronized = 0
+    for module in _collect_pt2e_fake_quantizers(model):
+        observer = getattr(module, "activation_post_process", None)
+        minimum = getattr(observer, "min_val", None)
+        maximum = getattr(observer, "max_val", None)
+        if not (torch.is_tensor(minimum) and torch.is_tensor(maximum)):
+            continue
+        if minimum.numel() == 0 or maximum.numel() == 0:
+            continue
+        torch.distributed.all_reduce(minimum, op=torch.distributed.ReduceOp.MIN)
+        torch.distributed.all_reduce(maximum, op=torch.distributed.ReduceOp.MAX)
+        if hasattr(module, "calculate_qparams"):
+            scale, zero_point = module.calculate_qparams()
+            module.scale.resize_(scale.shape).copy_(scale)
+            module.zero_point.resize_(zero_point.shape).copy_(zero_point)
+        synchronized += 1
+    return synchronized
+
+
+def inspect_pt2e_graph(model):
+    """Return graph-level Q/DQ counts so tests can verify real PT2E conversion."""
+    backbone = getattr(model, "backbone", None)
+    region = getattr(backbone, "body_region", None)
+    graph = getattr(region, "graph", None)
+    if graph is None:
+        return {"nodes": 0, "quantize": 0, "dequantize": 0, "quantized_ops": 0}
+    targets = [str(node.target) for node in graph.nodes]
+    return {
+        "nodes": len(targets),
+        "quantize": sum(
+            "quantize_per_tensor" in target or "quantize_per_channel" in target
+            for target in targets
+        ),
+        "dequantize": sum(
+            "dequantize_per_tensor" in target or "dequantize_per_channel" in target
+            for target in targets
+        ),
+        "quantized_ops": sum(
+            "quantized_decomposed" in target
+            and "dequantize" not in target
+            and "quantize" not in target
+            for target in targets
+        ),
+    }
+
+
+def _model_signature(model):
+    anchor_generator = model.rpn.anchor_generator
+    box_predictor = model.roi_heads.box_predictor
+    return {
+        "region": getattr(model, "pt2e_quantized_region", None),
+        "backbone_kind": getattr(model, "pt2e_backbone_kind", None),
+        "num_classes": int(box_predictor.cls_score.out_features),
+        "anchor_sizes": [list(map(float, sizes)) for sizes in anchor_generator.sizes],
+        "aspect_ratios": [list(map(float, ratios)) for ratios in anchor_generator.aspect_ratios],
+        "transform_min_size": list(map(int, model.transform.min_size)),
+        "transform_max_size": int(model.transform.max_size),
+        "transform_size_divisible": int(model.transform.size_divisible),
+        "fpn_out_channels": int(model.backbone.out_channels),
+    }
 
 
 def convert_pt2e_backbone(model, inplace=False, compile_region=False):
@@ -311,13 +487,71 @@ def compile_pt2e_region(model):
 
 
 def save_pt2e_int8_artifact(path, model, metrics=None, extra=None):
-    """Persist converted graph tensors without pickling the non-portable GraphModule."""
+    """Persist the converted ExportedProgram plus the FP32 detector remainder.
+
+    A plain state_dict is insufficient for PT2E: convert_pt2e embeds activation
+    scales/zero-points as FX graph constants. Reconstructing an empty graph and
+    loading only tensors silently changes predictions.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    graph = inspect_pt2e_graph(model)
+    if graph["quantize"] == 0 or graph["dequantize"] == 0:
+        raise RuntimeError("Refusing to save PT2E artifact: converted graph contains no Q/DQ nodes")
+    spec = getattr(model, "pt2e_export_spec", None)
+    if not isinstance(spec, dict):
+        raise RuntimeError("PT2E export spec is missing; prepare and convert the model first")
+    example = torch.randn(
+        int(spec["example_batch_size"]), 3,
+        int(spec["example_height"]), int(spec["example_width"]),
+    )
+    exported_program = export(
+        model.backbone.body_region,
+        (example,),
+        dynamic_shapes=_dynamic_shapes(
+            int(spec["example_batch_size"]), int(spec["maximum_batch_size"]),
+            int(spec["minimum_side"]), int(spec["maximum_side"]),
+            int(spec["spatial_divisor"]),
+        ),
+    )
+    exported_buffer = io.BytesIO()
+    torch.export.save(exported_program, exported_buffer)
+
+    # Catch serialization regressions before a long benchmark discovers that
+    # graph constants were dropped.
+    reloaded_region = torch.export.load(io.BytesIO(exported_buffer.getvalue())).module()
+    with torch.inference_mode():
+        reference_features = model.backbone.body_region(example)
+        reloaded_features = reloaded_region(example)
+    if len(reference_features) != len(reloaded_features):
+        raise RuntimeError("PT2E exported-region self-check changed the number of feature maps")
+    for index, (reference, reloaded) in enumerate(zip(reference_features, reloaded_features)):
+        try:
+            torch.testing.assert_close(reference, reloaded, rtol=0, atol=1e-6)
+        except AssertionError as error:
+            raise RuntimeError(
+                f"PT2E exported-region self-check failed for feature map {index}"
+            ) from error
+
+    detector_state = {
+        name: value
+        for name, value in model.state_dict().items()
+        if not name.startswith("backbone.body_region.")
+    }
     torch.save({
-        "model": model.state_dict(),
+        "exported_region": exported_buffer.getvalue(),
+        "detector_state": detector_state,
         "metrics": metrics or {},
-        "extra": {**(extra or {}), "format": "pt2e_int8_state_dict"},
+        "extra": {
+            **(extra or {}),
+            "format": "pt2e_int8_exported_region",
+            "format_version": 3,
+            "model_signature": _model_signature(model),
+            "graph": graph,
+            "export_spec": spec,
+            "torch_version": torch.__version__,
+            "artifact_self_check": "passed",
+        },
     }, path)
     return path
 
@@ -325,30 +559,78 @@ def save_pt2e_int8_artifact(path, model, metrics=None, extra=None):
 def load_pt2e_int8_artifact(path, config, compile_region=False):
     from ..models import build_fasterrcnn_convnext
 
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PT2E INT8 artifact not found: {path}")
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    if payload.get("extra", {}).get("format") != "pt2e_int8_state_dict":
-        raise ValueError("Not a PT2E INT8 state-dict artifact")
-    model = prepare_pt2e_backbone_qat(build_fasterrcnn_convnext(config), config)
-    # Conversion establishes the quantized_decomposed topology. Empty observer
-    # defaults are immediately replaced by the stored converted tensors below.
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
-        model = convert_pt2e_backbone(model, inplace=True, compile_region=False)
-    current_buffers = dict(model.named_buffers())
-    for name, value in payload["model"].items():
-        current = current_buffers.get(name)
-        if current is None or current.shape == value.shape:
-            continue
-        module_name, _, buffer_name = name.rpartition(".")
-        module = model.get_submodule(module_name) if module_name else model
-        if buffer_name not in module._buffers:
-            raise RuntimeError(f"PT2E artifact parameter shape mismatch: {name}")
-        # Per-channel qparams are data-dependent. An uncalibrated reconstruction
-        # initially creates scalar placeholders; resize those registered buffers
-        # before the strict state load.
-        module._buffers[buffer_name] = torch.empty_like(value)
-    model.load_state_dict(payload["model"], strict=True)
+    if not isinstance(payload, dict):
+        raise ValueError("Malformed PT2E INT8 artifact: expected a dictionary")
+    artifact_format = payload.get("extra", {}).get("format")
+    if artifact_format == "pt2e_int8_state_dict":
+        raise ValueError(
+            "Legacy PT2E state-dict artifact is incomplete because it does not preserve "
+            "FX graph qparam constants. Regenerate it from pt2e_qat_best.pt with the "
+            "current save_pt2e_int8_artifact()."
+        )
+    if artifact_format != "pt2e_int8_exported_region":
+        raise ValueError("Not a PT2E INT8 exported-region artifact")
+    if not isinstance(payload.get("exported_region"), bytes):
+        raise ValueError("Malformed PT2E INT8 artifact: missing exported_region bytes")
+    if not isinstance(payload.get("detector_state"), dict):
+        raise ValueError("Malformed PT2E INT8 artifact: missing detector_state")
+    saved_torch = payload.get("extra", {}).get("torch_version")
+    if saved_torch and _normalized_version(saved_torch)[:2] != _normalized_version(torch.__version__)[:2]:
+        raise RuntimeError(
+            "PT2E ExportedProgram must be loaded with the same PyTorch major/minor version. "
+            f"artifact={saved_torch}, runtime={torch.__version__}"
+        )
+
+    base_model = build_fasterrcnn_convnext(config)
+    original_backbone = base_model.backbone
+    active_backbone_kind = str(getattr(original_backbone, "pt2e_region_kind", "convnext")).lower()
+    saved_signature = payload.get("extra", {}).get("model_signature")
+    if not isinstance(saved_signature, dict):
+        raise ValueError("Malformed PT2E INT8 artifact: missing model_signature")
+    saved_region = saved_signature.get("region")
+    saved_backbone_kind = saved_signature.get("backbone_kind")
+    if saved_region not in {"backbone.body", "backbone.body+fpn"}:
+        raise ValueError(f"Unsupported PT2E artifact region: {saved_region}")
+    if saved_backbone_kind != active_backbone_kind:
+        raise ValueError(
+            "PT2E artifact backbone does not match the active config: "
+            f"artifact={saved_backbone_kind}, config={active_backbone_kind}"
+        )
+
+    converted_region = torch.export.load(io.BytesIO(payload["exported_region"])).module()
+    base_model.backbone = PT2EBackboneFPN(
+        converted_region,
+        original_backbone.fpn if saved_region == "backbone.body" else None,
+        original_backbone.out_channels,
+    )
+    base_model.pt2e_quantized_region = saved_region
+    base_model.pt2e_backbone_kind = active_backbone_kind
+    base_model.pt2e_export_spec = payload.get("extra", {}).get("export_spec", {})
+    if saved_region == "backbone.body+fpn":
+        base_model.transform.size_divisible = 64
+    model = base_model
+    if saved_signature != _model_signature(model):
+        raise ValueError(
+            "PT2E artifact is incompatible with the active config. "
+            f"saved_signature={saved_signature}, active_signature={_model_signature(model)}"
+        )
+    incompatible = model.load_state_dict(payload["detector_state"], strict=False)
+    if incompatible.unexpected_keys:
+        raise RuntimeError(f"Unexpected PT2E detector state keys: {incompatible.unexpected_keys}")
+    invalid_missing = [
+        name for name in incompatible.missing_keys
+        if not name.startswith("backbone.body_region.")
+    ]
+    if invalid_missing:
+        raise RuntimeError(f"Missing PT2E detector state keys: {invalid_missing}")
     model.cpu().eval()
+    graph = inspect_pt2e_graph(model)
+    if graph["quantize"] == 0 or graph["dequantize"] == 0:
+        raise RuntimeError("Reloaded PT2E artifact has no Q/DQ nodes")
     if compile_region:
         compile_pt2e_region(model)
     return model, payload

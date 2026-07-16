@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run exactly the next FP32 or QAT epoch, resume from Drive, then exit."""
+"""Run exactly the next FP32, selective-QAT, or PT2E-QAT epoch, then exit."""
 
 import argparse
 import subprocess
@@ -121,6 +121,7 @@ def main():
             script,
             "--config", args.config,
             "--epochs-this-run", "1",
+            "--no-find-unused-parameters",
         ]
         if last.is_file():
             command += ["--resume", str(last)]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune graph-mode PT2E QAT for ConvNeXt while keeping FPN/heads FP32."""
+"""Fine-tune graph-mode PT2E QAT for a supported backbone while keeping heads FP32."""
 
 import argparse
 import random
@@ -19,7 +19,8 @@ from pipelines.convnext_qat.metrics import evaluate_model, save_metrics
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
 from pipelines.convnext_qat.quantization import (
     convert_pt2e_backbone, prepare_pt2e_backbone_qat, save_pt2e_int8_artifact,
-    set_pt2e_qat_phase,
+    pt2e_observers_disabled, pt2e_qat_phase, set_pt2e_qat_phase,
+    validate_pt2e_schedule,
 )
 
 
@@ -49,6 +50,11 @@ def main():
     random.seed(config.get("seed", 42))
     torch.manual_seed(config.get("seed", 42))
     device = choose_device(config.get("device", "auto"))
+    total_epochs = int(config["training"].get("pt2e_qat_epochs", 3))
+    pt2e_config = config["quantization"].get("pt2e", {})
+    observer_warmup_epochs = int(pt2e_config.get("observer_warmup_epochs", 1))
+    observer_freeze_epochs = int(pt2e_config.get("observer_freeze_epochs", 1))
+    validate_pt2e_schedule(total_epochs, observer_warmup_epochs, observer_freeze_epochs)
     batch_size = int(config["training"].get("qat_batch_size", 1))
     train_loader = build_coco_loader(config, "train", limit=args.limit, batch_size=batch_size)
     val_loader = build_coco_loader(
@@ -59,7 +65,7 @@ def main():
     fp32_checkpoint = args.fp32_checkpoint or config["output"]["fp32_best"]
     print(f"Loading FP32 checkpoint: {fp32_checkpoint}", flush=True)
     load_checkpoint(fp32_checkpoint, model)
-    print("Exporting ConvNeXt body and preparing PT2E x86 QAT graph...", flush=True)
+    print("Exporting backbone body and preparing PT2E x86 QAT graph...", flush=True)
     model = prepare_pt2e_backbone_qat(model, config).to(device)
     optimizer = make_optimizer(model, config, qat=True)
 
@@ -69,12 +75,6 @@ def main():
         start_epoch = int(payload.get("epoch", 0))
         best_map = float(payload.get("extra", {}).get("best_map", -1.0))
         print(f"Resumed PT2E QAT checkpoint={args.resume} epoch={start_epoch}", flush=True)
-    total_epochs = int(config["training"].get("pt2e_qat_epochs", 3))
-    pt2e_config = config["quantization"].get("pt2e", {})
-    observer_warmup_epochs = int(pt2e_config.get("observer_warmup_epochs", 1))
-    observer_freeze_epochs = int(pt2e_config.get("observer_freeze_epochs", 1))
-    if observer_warmup_epochs + observer_freeze_epochs > total_epochs:
-        raise ValueError("PT2E observer warmup + freeze epochs exceed total epochs")
     if args.epochs_this_run is not None and args.epochs_this_run <= 0:
         raise ValueError("--epochs-this-run must be positive")
     end_epoch = total_epochs
@@ -95,12 +95,9 @@ def main():
         str(Path(config["output"]["directory"]) / "pt2e_int8_evaluation.json"),
     )
     for epoch in range(start_epoch, end_epoch):
-        if epoch < observer_warmup_epochs:
-            phase = "observer_warmup"
-        elif epoch >= total_epochs - observer_freeze_epochs:
-            phase = "frozen"
-        else:
-            phase = "full"
+        phase = pt2e_qat_phase(
+            epoch, total_epochs, observer_warmup_epochs, observer_freeze_epochs,
+        )
         fake_quantizers = set_pt2e_qat_phase(model, phase)
         print(
             f"PT2E QAT epoch={epoch + 1}/{total_epochs} phase={phase} "
@@ -117,13 +114,14 @@ def main():
             checkpoint_extra(config, best_map),
         )
         print(f"Saved pre-validation PT2E checkpoint: {last_path}", flush=True)
-        validation = evaluate_model(
-            model, val_loader, device, include_rpn=True,
-        )
-        timing = benchmark_inference(
-            model, val_loader, device,
-            int(config["training"].get("epoch_benchmark_images", 100)),
-        )
+        with pt2e_observers_disabled(model):
+            validation = evaluate_model(
+                model, val_loader, device, include_rpn=True,
+            )
+            timing = benchmark_inference(
+                model, val_loader, device,
+                int(config["training"].get("epoch_benchmark_images", 100)),
+            )
         metrics = {**validation, "benchmark": timing}
         # Only frozen-range checkpoints are eligible for final conversion.
         if phase == "frozen" and validation["map_50_95"] > best_map:

@@ -42,8 +42,12 @@ from pipelines.convnext_qat.models import build_fasterrcnn_convnext  # noqa: E40
 from pipelines.convnext_qat.quantization import (  # noqa: E402
     convert_pt2e_backbone,
     prepare_pt2e_backbone_qat,
+    pt2e_observers_disabled,
+    pt2e_qat_phase,
     save_pt2e_int8_artifact,
     set_pt2e_qat_phase,
+    synchronize_pt2e_observers,
+    validate_pt2e_schedule,
 )
 
 
@@ -211,6 +215,11 @@ def main():
         config = load_config(args.config, require_dataset=True)
         random.seed(config.get("seed", 42) + rank)
         torch.manual_seed(config.get("seed", 42) + rank)
+        total_epochs = int(config["training"].get("pt2e_qat_epochs", 3))
+        pt2e_config = config["quantization"].get("pt2e", {})
+        observer_warmup_epochs = int(pt2e_config.get("observer_warmup_epochs", 1))
+        observer_freeze_epochs = int(pt2e_config.get("observer_freeze_epochs", 1))
+        validate_pt2e_schedule(total_epochs, observer_warmup_epochs, observer_freeze_epochs)
         batch_size = int(config["training"].get("qat_batch_size", 1))
         train_loader, train_sampler = build_distributed_loader(
             config, "train", rank, world_size, limit=args.limit, batch_size=batch_size,
@@ -232,7 +241,7 @@ def main():
         fp32_checkpoint = args.fp32_checkpoint or config["output"]["fp32_best"]
         rank0_print(rank, f"Loading FP32 checkpoint: {fp32_checkpoint}")
         load_checkpoint(fp32_checkpoint, model)
-        rank0_print(rank, "Exporting ConvNeXt body and preparing PT2E x86 QAT graph...")
+        rank0_print(rank, "Exporting backbone body and preparing PT2E x86 QAT graph...")
         model = prepare_pt2e_backbone_qat(model, config).to(device)
         optimizer = make_optimizer(model, config, qat=True)
 
@@ -247,16 +256,12 @@ def main():
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            broadcast_buffers=True,
+            # Preserve ranges collected independently by each GPU; merge them
+            # explicitly once per epoch instead of overwriting rank 1 each step.
+            broadcast_buffers=False,
             find_unused_parameters=not args.no_find_unused_parameters,
         )
 
-        total_epochs = int(config["training"].get("pt2e_qat_epochs", 3))
-        pt2e_config = config["quantization"].get("pt2e", {})
-        observer_warmup_epochs = int(pt2e_config.get("observer_warmup_epochs", 1))
-        observer_freeze_epochs = int(pt2e_config.get("observer_freeze_epochs", 1))
-        if observer_warmup_epochs + observer_freeze_epochs > total_epochs:
-            raise ValueError("PT2E observer warmup + freeze epochs exceed total epochs")
         if args.epochs_this_run is not None and args.epochs_this_run <= 0:
             raise ValueError("--epochs-this-run must be positive")
         end_epoch = total_epochs
@@ -278,12 +283,9 @@ def main():
         )
 
         for epoch in range(start_epoch, end_epoch):
-            if epoch < observer_warmup_epochs:
-                phase = "observer_warmup"
-            elif epoch >= total_epochs - observer_freeze_epochs:
-                phase = "frozen"
-            else:
-                phase = "full"
+            phase = pt2e_qat_phase(
+                epoch, total_epochs, observer_warmup_epochs, observer_freeze_epochs,
+            )
             fake_quantizers = set_pt2e_qat_phase(model, phase)
             rank0_print(
                 rank,
@@ -301,6 +303,8 @@ def main():
                 float(config["training"].get("grad_clip_norm", 0)),
                 int(config["training"].get("print_frequency", 20)),
             )
+            synchronized_observers = synchronize_pt2e_observers(model)
+            rank0_print(rank, f"PT2E synchronized_observers={synchronized_observers}")
             dist.barrier()
 
             if rank == 0:
@@ -310,13 +314,14 @@ def main():
                     checkpoint_extra(config, best_map, world_size),
                 )
                 print(f"Saved pre-validation PT2E checkpoint: {last_path}", flush=True)
-                validation = evaluate_model(
-                    model, val_loader, device, include_rpn=True,
-                )
-                timing = benchmark_inference(
-                    model, val_loader, device,
-                    int(config["training"].get("epoch_benchmark_images", 100)),
-                )
+                with pt2e_observers_disabled(model):
+                    validation = evaluate_model(
+                        model, val_loader, device, include_rpn=True,
+                    )
+                    timing = benchmark_inference(
+                        model, val_loader, device,
+                        int(config["training"].get("epoch_benchmark_images", 100)),
+                    )
                 metrics = {**validation, "benchmark": timing}
                 benchmark_record = {
                     "stage": "pt2e",
