@@ -292,6 +292,7 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     example_height = int(pt2e.get("example_height", min(960, maximum_side)))
     example_width = int(pt2e.get("example_width", min(1280, maximum_side)))
     backbone = prepared_model.backbone
+    region_kind = str(getattr(backbone, "pt2e_region_kind", "convnext")).lower()
     default_spatial_divisor = int(getattr(backbone, "pt2e_spatial_divisor", 32))
     spatial_divisor = 64 if scope == "backbone_fpn" else default_spatial_divisor
     if any(
