@@ -1,4 +1,4 @@
-"""Detection metrics with optional canonical pycocotools evaluation."""
+"""Tính metric detection nội bộ và COCO mAP chuẩn khi có pycocotools."""
 
 import json
 from pathlib import Path
@@ -10,6 +10,7 @@ from .data import unwrap_coco_dataset
 
 
 def _average_precision(records, total_gt):
+    """Tính AP nội suy 101 điểm từ danh sách ``(score, is_true_positive)``."""
     if total_gt == 0 or not records:
         return float("nan") if total_gt == 0 else 0.0
     records.sort(key=lambda item: item[0], reverse=True)
@@ -17,11 +18,12 @@ def _average_precision(records, total_gt):
     fp = torch.tensor([not item[1] for item in records], dtype=torch.float64).cumsum(0)
     recall = tp / total_gt
     precision = tp / (tp + fp).clamp(min=1)
-    # COCO-style 101-point interpolated AP.
+    # COCO lấy precision tốt nhất tại 101 mức recall từ 0 đến 1.
     return float(torch.stack([precision[recall >= level].max() if (recall >= level).any() else torch.tensor(0.0) for level in torch.linspace(0, 1, 101)]).mean())
 
 
 def _ap_at_iou(predictions, targets, threshold, area_range=(0.0, float("inf"))):
+    """Tính AP trung bình các lớp tại một ngưỡng IoU và khoảng diện tích."""
     classes = sorted({int(label) for target in targets for label in target["labels"]})
     class_aps = []
     for label in classes:
@@ -53,6 +55,7 @@ def _ap_at_iou(predictions, targets, threshold, area_range=(0.0, float("inf"))):
 
 
 def native_detection_metrics(predictions, targets, score_threshold=0.5):
+    """Tính mAP, precision, recall, accuracy và mean IoU không cần pycocotools."""
     thresholds = [0.5 + 0.05 * index for index in range(10)]
     aps = [_ap_at_iou(predictions, targets, threshold) for threshold in thresholds]
     tp = fp = total_gt = 0
@@ -85,6 +88,7 @@ def native_detection_metrics(predictions, targets, score_threshold=0.5):
         "ap_large": [_ap_at_iou(predictions, targets, threshold, (96**2, float("inf"))) for threshold in thresholds],
     }
     def nanmean(values):
+        """Lấy trung bình và bỏ qua nhóm kích thước không có ground truth."""
         valid = [value for value in values if not torch.isnan(torch.tensor(value))]
         return sum(valid) / len(valid) if valid else float("nan")
 
@@ -101,6 +105,7 @@ def native_detection_metrics(predictions, targets, score_threshold=0.5):
 
 
 def _coco_metrics(predictions, targets, dataset):
+    """Chuyển prediction về COCO format rồi chạy COCOeval chính thức."""
     try:
         from pycocotools.coco import COCO
         from pycocotools.cocoeval import COCOeval
@@ -130,9 +135,8 @@ def _coco_metrics(predictions, targets, dataset):
         if int(annotation["category_id"]) in valid_category_ids
         and not annotation.get("iscrowd", 0)
     ]
-    # Some SeaDronesSee COCO exports omit optional fields expected by
-    # pycocotools. Normal images are not crowd regions; derive area from bbox
-    # when it is absent instead of requiring a rewritten annotation file.
+    # Một số annotation SeaDronesSee thiếu area/iscrowd; bổ sung tại bộ nhớ
+    # để COCOeval chạy được mà không sửa file dataset gốc.
     for annotation in coco_gt.dataset.get("annotations", []):
         annotation.setdefault("iscrowd", 0)
         if "area" not in annotation:
@@ -151,6 +155,7 @@ def _coco_metrics(predictions, targets, dataset):
 
 @torch.inference_mode()
 def rpn_recall(model, loader, device, limits=(100, 300, 1000)):
+    """Đo tỉ lệ ground-truth được RPN proposal phủ IoU>=0.5 ở các top-N."""
     hits = {limit: 0 for limit in limits}
     total = 0
     proposal_counts = []
@@ -190,6 +195,7 @@ def rpn_recall(model, loader, device, limits=(100, 300, 1000)):
 
 @torch.inference_mode()
 def evaluate_model(model, loader, device, include_rpn=True, progress_frequency=10):
+    """Inference toàn loader, gom prediction trên CPU rồi tính các metric detection."""
     model.eval()
     predictions, targets = [], []
     total_images = len(loader.dataset)
@@ -226,6 +232,7 @@ def evaluate_model(model, loader, device, include_rpn=True, progress_frequency=1
 
 
 def save_metrics(path, metrics):
+    """Lưu metric JSON, cho phép NaN ở nhóm object không xuất hiện."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:

@@ -1,3 +1,5 @@
+"""API công khai cho hai nhánh lượng tử hóa Selective Eager và PT2E graph."""
+
 from .selective_qat import convert_selective_qat, prepare_selective_qat, set_qat_phase
 from .pt2e_qat import (
     compile_pt2e_region, convert_pt2e_backbone, load_pt2e_int8_artifact,

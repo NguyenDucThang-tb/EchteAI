@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Train bù sai số Selective Eager QAT trên một GPU và convert INT8."""
 import argparse
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from pipelines.convnext_qat.quantization import convert_selective_qat, prepare_s
 
 
 def parse_args():
+    """Đọc FP32 source, QAT resume, variant và số epoch cần chạy."""
     parser = argparse.ArgumentParser(description="Selective QAT for Faster R-CNN ConvNeXt-FPN")
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
     parser.add_argument("--fp32-checkpoint", help="override output.fp32_best")
@@ -36,6 +38,7 @@ def parse_args():
 
 @torch.no_grad()
 def observer_warmup(model, loader, device, image_count):
+    """Thu range activation trên một số ảnh trước phase fake-quant."""
     print(f"observer calibration started target={image_count} device={device}", flush=True)
     model.eval()
     set_qat_phase(model, "calibration")
@@ -52,6 +55,7 @@ def observer_warmup(model, loader, device, image_count):
 
 
 def main():
+    """Prepare selective QAT, chạy lịch phase, validate và lưu INT8 cuối."""
     args = parse_args()
     config = load_config(args.config, require_dataset=True)
     variant = args.variant or str(config["quantization"].get("variant", "M3")).upper()

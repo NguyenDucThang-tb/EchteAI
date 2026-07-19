@@ -1,9 +1,12 @@
+"""Đọc, chuẩn hóa và kiểm tra cấu hình YAML của toàn pipeline."""
+
 from pathlib import Path
 
 import yaml
 
 
 def load_config(path, require_dataset=False):
+    """Nạp YAML và quy đổi mọi đường dẫn tương đối theo thư mục gốc repo."""
     path = Path(path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -13,7 +16,7 @@ def load_config(path, require_dataset=False):
         if section not in config:
             raise ValueError(f"Missing required config section: {section}")
 
-    # Relative dataset/output paths are resolved from the repository root, not cwd.
+    # Không phụ thuộc cwd của Colab/Kaggle; mọi path tương đối bám theo repo.
     root = path.parent.parent
     for key in ("train_images", "train_annotations", "val_images", "val_annotations", "test_images", "test_annotations"):
         value = config["dataset"].get(key)
@@ -28,6 +31,7 @@ def load_config(path, require_dataset=False):
 
 
 def validate_dataset_paths(config, splits=("train", "val")):
+    """Kiểm tra ảnh và annotation COCO của các split được yêu cầu."""
     missing = []
     for split in splits:
         for suffix in ("images", "annotations"):
@@ -39,6 +43,7 @@ def validate_dataset_paths(config, splits=("train", "val")):
 
 
 def choose_device(value):
+    """Chọn CUDA/CPU; báo lỗi sớm nếu cấu hình yêu cầu GPU nhưng máy không có."""
     import torch
 
     if value == "auto":
@@ -50,6 +55,7 @@ def choose_device(value):
 
 
 def quantized_modules_for_variant(config, variant):
+    """Trả danh sách module được lượng tử hóa cho biến thể M0-M4."""
     variant = str(variant).upper()
     quantization = config["quantization"]
     configured_variant = str(quantization.get("variant", "M3")).upper()

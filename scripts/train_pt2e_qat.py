@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune graph-mode PT2E QAT for a supported backbone while keeping heads FP32."""
+"""Train bù sai số PT2E graph-mode cho backbone, giữ detector heads FP32."""
 
 import argparse
 import random
@@ -25,6 +25,7 @@ from pipelines.convnext_qat.quantization import (
 
 
 def parse_args():
+    """Đọc config, resume checkpoint và số epoch PT2E cần chạy."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--fp32-checkpoint")
@@ -35,6 +36,7 @@ def parse_args():
 
 
 def checkpoint_extra(config, best_map):
+    """Tạo metadata mô tả scope, lịch phase và best mAP."""
     return {
         "format": "pt2e_prepared_qat",
         "region": config.get("quantization", {}).get("pt2e", {}).get("region", "backbone"),
@@ -45,6 +47,7 @@ def checkpoint_extra(config, best_map):
 
 
 def main():
+    """Prepare graph, chạy lịch observer/full/frozen, convert và đánh giá INT8."""
     args = parse_args()
     config = load_config(args.config, require_dataset=True)
     random.seed(config.get("seed", 42))

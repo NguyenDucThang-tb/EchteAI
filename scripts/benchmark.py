@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Đo latency, FPS, RAM và kích thước model FP32/Selective-INT8 trên CPU."""
 import argparse
 import gc
 import json
@@ -20,7 +21,9 @@ from pipelines.convnext_qat.data import build_coco_loader
 
 @torch.inference_mode()
 def benchmark(model, images, warmup, iterations):
+    """Đo nhiều vòng suy luận sau warmup và trả thống kê thời gian/bộ nhớ."""
     def rss_mb():
+        """Đọc resident memory hiện tại, ưu tiên psutil nếu có."""
         try:
             import psutil
             return psutil.Process(os.getpid()).memory_info().rss / (1024.0 * 1024.0)
@@ -51,6 +54,7 @@ def benchmark(model, images, warmup, iterations):
 
 
 def parse_args():
+    """Đọc tham số dòng lệnh cho benchmark CPU."""
     parser = argparse.ArgumentParser(description="CPU benchmark FP32 versus selective INT8")
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
     parser.add_argument("--fp32-checkpoint")
@@ -60,6 +64,7 @@ def parse_args():
 
 
 def main():
+    """Nạp hai model, benchmark cùng batch ảnh rồi ghi kết quả JSON."""
     args = parse_args()
     config = load_config(args.config)
     validate_dataset_paths(config, ("test",))

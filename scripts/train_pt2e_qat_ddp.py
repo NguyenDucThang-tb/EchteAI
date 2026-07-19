@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Distributed PT2E QAT training for multi-GPU Kaggle sessions.
+"""Train PT2E QAT phân tán bằng DDP cho phiên Kaggle nhiều GPU.
 
 Launch example:
     python -m torch.distributed.run --standalone --nproc_per_node=2 \
@@ -52,6 +52,7 @@ from pipelines.convnext_qat.quantization import (  # noqa: E402
 
 
 def parse_args():
+    """Đọc config, resume checkpoint, số epoch và tùy chọn DDP."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--fp32-checkpoint")
@@ -67,6 +68,7 @@ def parse_args():
 
 
 def checkpoint_extra(config, best_map, world_size):
+    """Tạo metadata PT2E kèm số GPU đã dùng."""
     return {
         "format": "pt2e_prepared_qat",
         "region": config.get("quantization", {}).get("pt2e", {}).get("region", "backbone"),
@@ -78,6 +80,7 @@ def checkpoint_extra(config, best_map, world_size):
 
 
 def setup_distributed():
+    """Khởi tạo NCCL và ánh xạ rank với GPU cục bộ."""
     if "LOCAL_RANK" not in os.environ:
         raise RuntimeError("train_pt2e_qat_ddp.py must be launched with torch.distributed.run/torchrun")
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -95,16 +98,19 @@ def setup_distributed():
 
 
 def cleanup_distributed():
+    """Đóng process group sau train."""
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
 
 
 def rank0_print(rank, *values):
+    """Chỉ in log từ rank 0."""
     if rank == 0:
         print(*values, flush=True)
 
 
 def build_distributed_loader(config, split, rank, world_size, limit=None, batch_size=None):
+    """Tạo DataLoader PT2E với DistributedSampler."""
     dataset_cfg = config["dataset"]
     dataset = CocoDetectionDataset(
         dataset_cfg[f"{split}_images"],
@@ -141,6 +147,7 @@ def build_distributed_loader(config, split, rank, world_size, limit=None, batch_
 
 
 def move_targets(targets, device):
+    """Chuyển target sang device của rank."""
     return [
         {key: value.to(device) if torch.is_tensor(value) else value for key, value in target.items()}
         for target in targets
@@ -148,6 +155,7 @@ def move_targets(targets, device):
 
 
 def reduce_train_metrics(loss_sum, steps, seconds, device):
+    """Gộp thống kê train từ tất cả rank."""
     values = torch.tensor([loss_sum, float(steps), seconds], device=device)
     dist.all_reduce(values, op=dist.ReduceOp.SUM)
     total_loss, total_steps, summed_seconds = values.tolist()
@@ -170,6 +178,7 @@ def train_one_epoch_ddp(
     grad_clip_norm=0.0,
     print_frequency=20,
 ):
+    """Train một epoch PT2E QAT phân tán."""
     sampler.set_epoch(epoch)
     model.train()
     total_loss = 0.0
@@ -209,6 +218,7 @@ def train_one_epoch_ddp(
 
 
 def main():
+    """Prepare cùng graph trên mỗi GPU, đồng bộ observer và lưu bằng rank 0."""
     args = parse_args()
     local_rank, rank, world_size, device = setup_distributed()
     try:

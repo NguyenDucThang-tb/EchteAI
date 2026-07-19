@@ -1,1 +1,1 @@
-"""End-to-end model pipelines maintained by EchteAI."""
+"""Các pipeline model end-to-end đang được EchteAI duy trì."""

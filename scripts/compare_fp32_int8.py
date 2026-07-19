@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fair CPU comparison of FP32 and selective-INT8 detection checkpoints."""
+"""So sánh công bằng detector FP32 và Selective-INT8 trên cùng CPU."""
 
 import argparse
 import json
@@ -21,6 +21,7 @@ from pipelines.convnext_qat.metrics import evaluate_model
 
 
 def parse_args():
+    """Đọc checkpoint, số ảnh và số CPU thread từ CLI."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--fp32-checkpoint", required=True)
@@ -32,6 +33,7 @@ def parse_args():
 
 
 def evaluate_one(config, kind, checkpoint, loader, device, images):
+    """Nạp một model rồi đo detection metrics, latency và kích thước."""
     print(f"Loading {kind.upper()} checkpoint: {checkpoint}", flush=True)
     model = load_model(config, kind, checkpoint, device)
     metrics = evaluate_model(model, loader, device, include_rpn=False)
@@ -52,17 +54,19 @@ def evaluate_one(config, kind, checkpoint, loader, device, images):
 
 
 def line(label, value, suffix=""):
+    """In một chỉ số theo định dạng thống nhất."""
     print(f"  {label}: {value:.4f}{suffix}")
 
 
 def main():
+    """Chạy hai lượt đánh giá và tính độ chênh accuracy/tốc độ/kích thước."""
     args = parse_args()
     if args.images <= 0 or args.threads <= 0:
         raise ValueError("images and threads must be positive")
     torch.set_num_threads(args.threads)
     device = torch.device("cpu")
     config = load_config(args.config, require_dataset=True)
-    # A batch of one gives per-image CPU latency and avoids batch-dependent bias.
+    # Batch 1 cho latency theo ảnh và tránh thiên lệch do cách gom batch.
     loader = build_coco_loader(
         config, "val", shuffle=False, limit=args.images, batch_size=1,
     )

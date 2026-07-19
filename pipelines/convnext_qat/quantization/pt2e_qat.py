@@ -1,4 +1,9 @@
-"""Graph-mode PT2E QAT for the backbone body with an FP32 FPN/head boundary."""
+"""QAT graph-mode PT2E cho backbone, giữ phần detector còn lại ở FP32.
+
+Luồng chính: tách vùng tensor-only -> ``torch.export`` -> ``prepare_qat_pt2e``
+-> train bù sai số -> ``convert_pt2e`` -> tùy chọn ``torch.compile``. PT2E nhìn
+toàn subgraph để backend có thể fuse toán tử và giảm các ranh giới Q/DQ.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +21,12 @@ from torch.export import Dim, export
 
 
 def _normalized_version(value):
+    """Đổi chuỗi phiên bản Torch thành tuple số để so sánh ổn định."""
     return tuple(int(part) for part in value.split("+", 1)[0].split(".")[:3])
 
 
 def _collect_pt2e_fake_quantizers(model):
+    """Tìm fake-quantizer theo giao diện, không phụ thuộc class nội bộ TorchAO."""
     required_methods = {
         "enable_observer", "disable_observer", "enable_fake_quant", "disable_fake_quant",
     }
@@ -30,7 +37,7 @@ def _collect_pt2e_fake_quantizers(model):
 
 
 def validate_pt2e_schedule(total_epochs, observer_warmup_epochs, observer_freeze_epochs):
-    """Validate a QAT phase schedule before expensive model construction starts."""
+    """Kiểm tra lịch phase trước khi tốn chi phí dựng và export model."""
     values = {
         "total_epochs": int(total_epochs),
         "observer_warmup_epochs": int(observer_warmup_epochs),
@@ -51,7 +58,7 @@ def validate_pt2e_schedule(total_epochs, observer_warmup_epochs, observer_freeze
 
 
 def pt2e_qat_phase(epoch, total_epochs, observer_warmup_epochs, observer_freeze_epochs):
-    """Return the deterministic QAT phase for a zero-based epoch index."""
+    """Trả về phase QAT xác định theo epoch đánh số từ 0."""
     values = validate_pt2e_schedule(
         total_epochs, observer_warmup_epochs, observer_freeze_epochs,
     )
@@ -66,6 +73,7 @@ def pt2e_qat_phase(epoch, total_epochs, observer_warmup_epochs, observer_freeze_
 
 
 def _torchao_pt2e():
+    """Nạp API TorchAO PT2E và chặn tổ hợp phiên bản không tương thích."""
     if _normalized_version(torch.__version__) < (2, 11, 0):
         raise RuntimeError(
             "PT2E QAT in this repo needs torch >= 2.11.0. "
@@ -96,7 +104,7 @@ def _torchao_pt2e():
 
 
 class BackboneBodyRegion(nn.Module):
-    """Tensor-only export boundary returning C2-C5 as a stable tuple."""
+    """Ranh giới export tensor-only, trả C2-C5 dưới dạng tuple ổn định."""
 
     def __init__(self, body, feature_indices):
         super().__init__()
@@ -104,6 +112,7 @@ class BackboneBodyRegion(nn.Module):
         self.feature_indices = tuple(int(value) for value in feature_indices)
 
     def forward(self, x):
+        """Chạy body và lấy đúng bốn feature map được FPN sử dụng."""
         outputs = []
         for index, layer in enumerate(self.body):
             x = layer(x)
@@ -113,13 +122,12 @@ class BackboneBodyRegion(nn.Module):
 
 
 class _PT2EResNetBottleneck(nn.Module):
-    """ResNet bottleneck with distinct ReLU module sources for PT2E matching.
+    """ResNet bottleneck có ba nguồn ReLU riêng để PT2E nhận diện đúng.
 
-    torchvision's Bottleneck invokes one ``self.relu`` module three times.
-    TorchAO 0.17 groups those calls into one source partition with multiple
-    outputs, while X86InductorQuantizer's QAT fusion matcher requires exactly
-    one output per partition. Splitting the stateless ReLUs preserves the
-    computation and state-dict names of all weighted layers.
+    Bottleneck của torchvision gọi cùng ``self.relu`` ba lần. TorchAO 0.17 gom
+    chúng thành một partition có nhiều output, còn X86InductorQuantizer yêu cầu
+    mỗi partition chỉ có một output. Tách ba ReLU không trạng thái không làm đổi
+    phép tính hay tên weight.
     """
 
     def __init__(self, block):
@@ -137,6 +145,7 @@ class _PT2EResNetBottleneck(nn.Module):
         self.stride = block.stride
 
     def forward(self, x):
+        """Chạy residual bottleneck với ba ReLU tách nguồn."""
         identity = x
         out = self.relu1(self.bn1(self.conv1(x)))
         out = self.relu2(self.bn2(self.conv2(out)))
@@ -148,6 +157,7 @@ class _PT2EResNetBottleneck(nn.Module):
 
 
 def _split_resnet_bottleneck_relus(module):
+    """Thay đệ quy Bottleneck torchvision bằng phiên bản tương thích PT2E."""
     for name, child in list(module.named_children()):
         if child.__class__.__name__ == "Bottleneck":
             setattr(module, name, _PT2EResNetBottleneck(child))
@@ -157,7 +167,7 @@ def _split_resnet_bottleneck_relus(module):
 
 
 class ResNet50BodyRegion(nn.Module):
-    """Explicit ResNet-50 export boundary with cloned C2-C5 outputs."""
+    """Ranh giới export ResNet-50 tường minh, trả các feature C2-C5."""
 
     def __init__(self, body):
         super().__init__()
@@ -168,12 +178,10 @@ class ResNet50BodyRegion(nn.Module):
         self.layer4 = _split_resnet_bottleneck_relus(body[4])
 
     def forward(self, x):
+        """Trả tuple C2-C5 của ResNet-50."""
         x = self.stem(x)
-        # Put one clone immediately after every stage and feed that clone to
-        # both the next stage and the returned feature tuple. Without this
-        # boundary the last ReLU partition has two external output nodes
-        # (the next stage and the detector output), which makes
-        # X86InductorQuantizer QAT annotation fail for ResNet residual blocks.
+        # Clone tạo ranh giới rõ giữa các stage. Nếu không có nó, ReLU cuối có
+        # hai output ngoài partition và X86InductorQuantizer không annotate được.
         c2 = self.layer1(x).clone()
         c3 = self.layer2(c2).clone()
         c4 = self.layer3(c3).clone()
@@ -182,7 +190,7 @@ class ResNet50BodyRegion(nn.Module):
 
 
 class BackboneBodyFPNRegion(nn.Module):
-    """Optional second PT2E scope covering the backbone body and the complete FPN."""
+    """Vùng PT2E tùy chọn bao trọn backbone body và toàn bộ FPN."""
 
     def __init__(self, body, fpn, feature_indices):
         super().__init__()
@@ -190,13 +198,14 @@ class BackboneBodyFPNRegion(nn.Module):
         self.fpn = fpn
 
     def forward(self, x):
+        """Chạy body rồi FPN trong cùng một vùng export."""
         tensors = self.body(x)
         features = OrderedDict((str(index), tensor) for index, tensor in enumerate(tensors))
         return tuple(self.fpn(features).values())
 
 
 class ResNet50BodyFPNRegion(nn.Module):
-    """Optional PT2E scope covering explicit ResNet-50 body and full FPN."""
+    """Vùng PT2E tùy chọn bao trọn ResNet-50 body và toàn bộ FPN."""
 
     def __init__(self, body, fpn):
         super().__init__()
@@ -204,13 +213,14 @@ class ResNet50BodyFPNRegion(nn.Module):
         self.fpn = fpn
 
     def forward(self, x):
+        """Chạy ResNet body rồi FPN trong cùng một vùng export."""
         tensors = self.body(x)
         features = OrderedDict((str(index), tensor) for index, tensor in enumerate(tensors))
         return tuple(self.fpn(features).values())
 
 
 def build_backbone_body_region(backbone, scope="backbone"):
-    """Build the tensor-only PT2E export region for the selected backbone."""
+    """Dựng vùng export tensor-only tương ứng loại backbone và scope."""
     scope = str(scope).lower()
     if scope not in {"backbone", "backbone_fpn"}:
         raise ValueError("scope must be backbone or backbone_fpn")
@@ -230,7 +240,7 @@ def build_backbone_body_region(backbone, scope="backbone"):
 
 
 class PT2EBackboneFPN(nn.Module):
-    """PT2E backbone graph followed by the original FP32 torchvision FPN."""
+    """Ghép graph backbone PT2E với FPN torchvision FP32 nguyên bản."""
 
     def __init__(self, body_region, fpn, out_channels):
         super().__init__()
@@ -239,15 +249,16 @@ class PT2EBackboneFPN(nn.Module):
         self.out_channels = int(out_channels)
 
     def train(self, mode: bool = True):
-        # Exported GraphModules reject .train()/.eval(). Their backbone graph is
-        # captured in deterministic eval form; QAT fake-quant nodes still update
-        # during forward. Only the ordinary FPN needs recursive mode switching.
+        """Chuyển mode phần FPN thường mà không gọi train trên GraphModule."""
+        # GraphModule đã export không cho gọi train()/eval(). Fake-quant vẫn cập
+        # nhật khi forward; chỉ FPN thường cần chuyển mode đệ quy.
         self.training = mode
         if self.fpn is not None:
             self.fpn.train(mode)
         return self
 
     def forward(self, x):
+        """Chạy graph PT2E và đổi tuple feature thành OrderedDict cho detector."""
         tensors = self.body_region(x)
         features = OrderedDict((str(index), tensor) for index, tensor in enumerate(tensors))
         return self.fpn(features) if self.fpn is not None else features
@@ -255,8 +266,8 @@ class PT2EBackboneFPN(nn.Module):
 
 def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximum_side,
                     spatial_divisor=32):
-    # ConvNeXt downsamples by 32. Expressing this relation explicitly avoids
-    # torch.export constraint violations while retaining variable image shapes.
+    """Khai báo batch/H/W động nhưng vẫn giữ ràng buộc stride của backbone."""
+    # H/W theo bội số stride giúp torch.export thỏa guard và vẫn nhận ảnh động.
     height = spatial_divisor * Dim(
         f"image_h_div_{spatial_divisor}", min=max(1, minimum_side // spatial_divisor),
         max=maximum_side // spatial_divisor,
@@ -277,7 +288,11 @@ def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximu
 
 
 def prepare_pt2e_backbone_qat(model, config, inplace=False):
-    """Replace only backbone body with a prepared x86 PT2E QAT graph."""
+    """Thay vùng backbone bằng graph x86 PT2E đã prepare cho QAT.
+
+    Mặc định chỉ body được export; FPN, RPN, ROI heads và NMS vẫn ở FP32.
+    Scope ``backbone_fpn`` là nhánh mở rộng và cần padding ảnh theo bội 64.
+    """
     prepared_model = model if inplace else copy.deepcopy(model)
     if isinstance(prepared_model.backbone, PT2EBackboneFPN):
         return prepared_model
@@ -305,6 +320,7 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     if maximum_batch < example_batch:
         raise ValueError("pt2e.maximum_batch_size must be >= example_batch_size")
 
+    # Export trên CPU với input mẫu; dynamic_shapes giữ kích thước ảnh linh hoạt.
     region = build_backbone_body_region(backbone, scope=scope).cpu().eval()
     example = torch.randn(example_batch, 3, example_height, example_width)
     exported = export(
@@ -344,14 +360,17 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
         "spatial_divisor": spatial_divisor,
     }
     if scope == "backbone_fpn":
-        # FPN creates additional parity guards. Faster R-CNN must therefore pad
-        # its internal ImageList to 64 instead of the default backbone stride.
+        # FPN sinh thêm guard chẵn/lẻ nên ImageList phải pad đến bội 64.
         prepared_model.transform.size_divisible = 64
     return prepared_model
 
 
 def set_pt2e_qat_phase(model, phase):
-    """Set observer-only warmup, full fake-quant QAT, or frozen ranges."""
+    """Bật phase observer warmup, full QAT hoặc đóng băng range.
+
+    Warmup chỉ thu range; full vừa thu range vừa fake-quant; frozen giữ nguyên
+    scale/zero-point để các epoch cuối ổn định.
+    """
     if phase not in {"observer_warmup", "full", "frozen"}:
         raise ValueError("PT2E phase must be observer_warmup, full, or frozen")
     fake_quantizers = _collect_pt2e_fake_quantizers(model)
@@ -376,7 +395,7 @@ def set_pt2e_qat_phase(model, phase):
 
 @contextmanager
 def pt2e_observers_disabled(model):
-    """Temporarily freeze PT2E observers during validation/benchmark inference."""
+    """Tạm tắt observer khi validation/benchmark rồi khôi phục trạng thái."""
     fake_quantizers = _collect_pt2e_fake_quantizers(model)
     states = []
     for module in fake_quantizers:
@@ -392,7 +411,7 @@ def pt2e_observers_disabled(model):
 
 
 def synchronize_pt2e_observers(model):
-    """Merge min/max observer ranges across DDP ranks before rank-0 validation/save."""
+    """Gộp min/max observer giữa các rank DDP trước validation và lưu model."""
     if not torch.distributed.is_available() or not torch.distributed.is_initialized():
         return 0
     synchronized = 0
@@ -415,7 +434,7 @@ def synchronize_pt2e_observers(model):
 
 
 def inspect_pt2e_graph(model):
-    """Return graph-level Q/DQ counts so tests can verify real PT2E conversion."""
+    """Đếm node Q/DQ và quantized op để xác nhận graph đã convert thật."""
     backbone = getattr(model, "backbone", None)
     region = getattr(backbone, "body_region", None)
     graph = getattr(region, "graph", None)
@@ -442,6 +461,7 @@ def inspect_pt2e_graph(model):
 
 
 def _model_signature(model):
+    """Tạo chữ ký kiến trúc để chặn load artifact bằng config không tương thích."""
     anchor_generator = model.rpn.anchor_generator
     box_predictor = model.roi_heads.box_predictor
     return {
@@ -458,7 +478,7 @@ def _model_signature(model):
 
 
 def convert_pt2e_backbone(model, inplace=False, compile_region=False):
-    """Convert the prepared backbone graph and optionally compile that graph."""
+    """Convert graph backbone đã QAT và tùy chọn compile riêng vùng đó."""
     converted_model = model if inplace else copy.deepcopy(model)
     if not isinstance(converted_model.backbone, PT2EBackboneFPN):
         raise TypeError("Model has not been prepared by prepare_pt2e_backbone_qat")
@@ -475,7 +495,7 @@ def convert_pt2e_backbone(model, inplace=False, compile_region=False):
 
 
 def compile_pt2e_region(model):
-    """Compile only the converted tensor graph, leaving detection control flow eager."""
+    """Compile graph tensor INT8, giữ control flow detector chạy Eager."""
     python_header = Path(sysconfig.get_paths()["include"]) / "Python.h"
     if not python_header.is_file():
         raise RuntimeError(
@@ -488,11 +508,11 @@ def compile_pt2e_region(model):
 
 
 def save_pt2e_int8_artifact(path, model, metrics=None, extra=None):
-    """Persist the converted ExportedProgram plus the FP32 detector remainder.
+    """Lưu ExportedProgram INT8 cùng phần detector FP32 còn lại.
 
-    A plain state_dict is insufficient for PT2E: convert_pt2e embeds activation
-    scales/zero-points as FX graph constants. Reconstructing an empty graph and
-    loading only tensors silently changes predictions.
+    Chỉ lưu ``state_dict`` là không đủ: ``convert_pt2e`` nhúng scale/zero-point
+    activation thành hằng số trong FX graph. Dựng graph rỗng rồi nạp tensor sẽ
+    âm thầm làm thay đổi dự đoán.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -518,8 +538,8 @@ def save_pt2e_int8_artifact(path, model, metrics=None, extra=None):
     exported_buffer = io.BytesIO()
     torch.export.save(exported_program, exported_buffer)
 
-    # Catch serialization regressions before a long benchmark discovers that
-    # graph constants were dropped.
+    # Tự reload và so feature map ngay lúc lưu để bắt lỗi mất graph constant,
+    # tránh chỉ phát hiện sau một benchmark dài.
     reloaded_region = torch.export.load(io.BytesIO(exported_buffer.getvalue())).module()
     with torch.inference_mode():
         reference_features = model.backbone.body_region(example)
@@ -534,6 +554,8 @@ def save_pt2e_int8_artifact(path, model, metrics=None, extra=None):
                 f"PT2E exported-region self-check failed for feature map {index}"
             ) from error
 
+    # body_region đã nằm trong ExportedProgram; chỉ lưu phần detector FP32 để
+    # không ghi trùng và không làm mất qparam nằm trong graph.
     detector_state = {
         name: value
         for name, value in model.state_dict().items()
@@ -558,6 +580,7 @@ def save_pt2e_int8_artifact(path, model, metrics=None, extra=None):
 
 
 def load_pt2e_int8_artifact(path, config, compile_region=False):
+    """Khôi phục artifact PT2E, kiểm tra phiên bản/chữ ký rồi ghép detector."""
     from ..models import build_fasterrcnn_convnext
 
     path = Path(path)

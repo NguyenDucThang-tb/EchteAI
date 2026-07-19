@@ -1,4 +1,4 @@
-"""Faster R-CNN assembly with a configurable FPN backbone."""
+"""Lắp Faster R-CNN + FPN và thay classification loss bằng Focal Loss."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ _FOCAL_GAMMA = 2.0
 
 
 def _anchors(config):
+    """Tạo một scale anchor cho mỗi mức P2-P6 và dùng chung aspect ratio."""
     sizes = resolve_anchor_sizes(config)
     model_cfg = config["model"]
     ratios = tuple(float(value) for value in model_cfg.get("aspect_ratios", (0.5, 1.0, 2.0)))
@@ -32,6 +33,7 @@ def _anchors(config):
 
 
 def _sigmoid_focal_loss(inputs, targets, alpha=_FOCAL_ALPHA, gamma=_FOCAL_GAMMA):
+    """Focal BCE nhị phân cho objectness foreground/background của RPN."""
     targets = targets.to(dtype=inputs.dtype)
     bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
     probs = torch.sigmoid(inputs)
@@ -45,6 +47,7 @@ def _sigmoid_focal_loss(inputs, targets, alpha=_FOCAL_ALPHA, gamma=_FOCAL_GAMMA)
 
 
 def _softmax_focal_loss(class_logits, labels, alpha=_FOCAL_ALPHA, gamma=_FOCAL_GAMMA):
+    """Focal Cross Entropy đa lớp cho nhánh phân loại RoI."""
     valid = labels >= 0
     if not torch.any(valid):
         return class_logits.sum() * 0.0
@@ -66,6 +69,7 @@ def _softmax_focal_loss(class_logits, labels, alpha=_FOCAL_ALPHA, gamma=_FOCAL_G
 
 
 def _focal_fastrcnn_loss(class_logits, box_regression, labels, regression_targets, alpha=_FOCAL_ALPHA, gamma=_FOCAL_GAMMA):
+    """Ghép Focal classification với Smooth-L1 box regression nguyên bản."""
     labels = torch.cat(labels, dim=0)
     regression_targets = torch.cat(regression_targets, dim=0)
 
@@ -85,12 +89,14 @@ def _focal_fastrcnn_loss(class_logits, box_regression, labels, regression_target
 
 
 class FocalRegionProposalNetwork(rpn_module.RegionProposalNetwork):
+    """RPN giữ sampling/regression gốc, chỉ đổi objectness sang Focal Loss."""
     def __init__(self, *args, focal_alpha: float = _FOCAL_ALPHA, focal_gamma: float = _FOCAL_GAMMA, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
 
     def compute_loss(self, objectness, pred_bbox_deltas, labels, regression_targets):
+        """Tính loss trên tập positive/negative anchor đã được sampler chọn."""
         sampled_pos_inds, sampled_neg_inds = self.fg_bg_sampler(labels)
         sampled_pos_inds = torch.where(torch.cat(sampled_pos_inds, dim=0))[0]
         sampled_neg_inds = torch.where(torch.cat(sampled_neg_inds, dim=0))[0]
@@ -118,6 +124,7 @@ class FocalRegionProposalNetwork(rpn_module.RegionProposalNetwork):
 
 
 class FocalRoIHeads(roi_heads_module.RoIHeads):
+    """RoI heads dùng Focal Loss khi train và decode detection như bản gốc."""
     def __init__(self, *args, focal_alpha: float = _FOCAL_ALPHA, focal_gamma: float = _FOCAL_GAMMA, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.focal_alpha = focal_alpha
@@ -130,6 +137,7 @@ class FocalRoIHeads(roi_heads_module.RoIHeads):
         image_shapes: list[tuple[int, int]],
         targets: Optional[list[dict[str, torch.Tensor]]] = None,
     ) -> tuple[list[dict[str, torch.Tensor]], dict[str, torch.Tensor]]:
+        """Train trả dict loss; eval trả boxes/labels/scores cho từng ảnh."""
         if targets is not None:
             for t in targets:
                 floating_point_types = (torch.float, torch.double, torch.half)
@@ -177,6 +185,7 @@ class FocalRoIHeads(roi_heads_module.RoIHeads):
 
 
 def _install_focal_loss(model, model_cfg):
+    """Thay RPN/RoIHeads theo từng model instance, không monkeypatch toàn cục."""
     configured_alpha = model_cfg.get("focal_alpha")
     focal_alpha = None if configured_alpha is None else float(configured_alpha)
     focal_gamma = float(model_cfg.get("focal_gamma", 2.0))
@@ -218,7 +227,7 @@ def _install_focal_loss(model, model_cfg):
 
 
 def build_fasterrcnn_convnext(config):
-    """Build an unquantized model. Selective QAT is applied as a separate step."""
+    """Xây model FP32; selective/PT2E QAT được áp dụng ở bước riêng sau đó."""
     model_cfg = config["model"]
     num_classes = int(config["dataset"]["num_classes"])
     if num_classes < 2:

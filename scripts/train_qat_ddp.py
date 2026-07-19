@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Distributed selective QAT training for multi-GPU Kaggle sessions.
+"""Train Selective Eager QAT phân tán bằng DDP trên nhiều GPU.
 
 Launch example:
     python -m torch.distributed.run --standalone --nproc_per_node=2 \
@@ -48,6 +48,7 @@ from pipelines.convnext_qat.quantization import (  # noqa: E402
 
 
 def parse_args():
+    """Đọc config, FP32 source, QAT resume và tùy chọn DDP."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
     parser.add_argument("--fp32-checkpoint", help="override output.fp32_best")
@@ -64,6 +65,7 @@ def parse_args():
 
 
 def setup_distributed():
+    """Khởi tạo NCCL process group và device theo LOCAL_RANK."""
     if "LOCAL_RANK" not in os.environ:
         raise RuntimeError("train_qat_ddp.py must be launched with torch.distributed.run/torchrun")
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -83,16 +85,19 @@ def setup_distributed():
 
 
 def cleanup_distributed():
+    """Hủy process group an toàn khi kết thúc."""
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
 
 
 def rank0_print(rank, *values):
+    """Chỉ xuất log từ rank 0."""
     if rank == 0:
         print(*values, flush=True)
 
 
 def build_distributed_loader(config, split, rank, world_size, limit=None, batch_size=None):
+    """Tạo loader phân mảnh dữ liệu cho từng rank."""
     dataset_cfg = config["dataset"]
     dataset = CocoDetectionDataset(
         dataset_cfg[f"{split}_images"],
@@ -129,6 +134,7 @@ def build_distributed_loader(config, split, rank, world_size, limit=None, batch_
 
 
 def move_targets(targets, device):
+    """Đưa target dictionary lên GPU của rank."""
     return [
         {key: value.to(device) if torch.is_tensor(value) else value for key, value in target.items()}
         for target in targets
@@ -136,6 +142,7 @@ def move_targets(targets, device):
 
 
 def reduce_train_metrics(loss_sum, steps, seconds, device):
+    """Gộp loss, step và thời gian giữa các rank."""
     values = torch.tensor([loss_sum, float(steps), seconds], device=device)
     dist.all_reduce(values, op=dist.ReduceOp.SUM)
     total_loss, total_steps, summed_seconds = values.tolist()
@@ -158,6 +165,7 @@ def train_one_epoch_ddp(
     grad_clip_norm=0.0,
     print_frequency=20,
 ):
+    """Train một epoch selective QAT bằng DDP."""
     sampler.set_epoch(epoch)
     model.train()
     total_loss = 0.0
@@ -197,12 +205,14 @@ def train_one_epoch_ddp(
 
 
 def broadcast_buffers_from_rank0(module):
+    """Phát buffer observer/model của rank 0 sang các rank còn lại."""
     for buffer in module.buffers():
         dist.broadcast(buffer, src=0)
 
 
 @torch.no_grad()
 def observer_warmup_ddp(model, loader, device, image_count, rank):
+    """Calibration observer phân tán trước khi bật fake-quant."""
     rank0_print(rank, f"observer calibration started target={image_count} device={device}")
     model.eval()
     set_qat_phase(model.module, "calibration")
@@ -223,6 +233,7 @@ def observer_warmup_ddp(model, loader, device, image_count, rank):
 
 
 def main():
+    """Prepare QAT trên mỗi rank, train DDP, validate và lưu ở rank 0."""
     args = parse_args()
     local_rank, rank, world_size, device = setup_distributed()
     try:

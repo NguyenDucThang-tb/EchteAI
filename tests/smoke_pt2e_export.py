@@ -1,4 +1,4 @@
-"""Smoke-check the tensor-only backbone PT2E export boundary without TorchAO."""
+"""Smoke test ranh giới export tensor-only PT2E mà không cần TorchAO."""
 
 import copy
 import sys
@@ -19,6 +19,7 @@ from pipelines.convnext_qat.quantization.pt2e_qat import (
 
 
 def run_body(backbone, expected_channels, name):
+    """Export backbone body, chạy nhiều shape và kiểm tra số kênh feature."""
     original = copy.deepcopy(backbone).eval()
     if getattr(backbone, "pt2e_region_kind", "") == "resnet50":
         region = ResNet50BodyRegion(backbone.body).eval()
@@ -51,6 +52,7 @@ def run_body(backbone, expected_channels, name):
 
 
 def run_fpn(backbone, name):
+    """Export backbone+FPN và xác nhận dynamic shape theo bội 64."""
     if getattr(backbone, "pt2e_region_kind", "") == "resnet50":
         region = ResNet50BodyFPNRegion(backbone.body, backbone.fpn).eval()
     else:
@@ -70,6 +72,7 @@ def run_fpn(backbone, name):
 
 
 def main():
+    """Chạy smoke export cho tất cả backbone được hỗ trợ."""
     try:
         _dynamic_shapes(1, 2, 224, 1024)
     except ValueError as error:

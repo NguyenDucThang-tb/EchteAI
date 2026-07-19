@@ -1,4 +1,4 @@
-"""Dataset-driven anchor statistics for the ConvNeXt-FPN detector."""
+"""Thống kê bounding box để sinh anchor phù hợp cho detector ConvNeXt-FPN."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import torch
 
 
 def _kmeans_1d(values: torch.Tensor, clusters: int, iterations: int = 100) -> torch.Tensor:
-    """Deterministic k-means in log space, robust to long-tailed box sizes."""
+    """Gom cụm kích thước hộp trong log-space để giảm ảnh hưởng của hộp quá lớn."""
     if values.numel() < clusters:
         raise ValueError(f"Need at least {clusters} valid boxes, found {values.numel()}")
     values = values.log()
@@ -31,7 +31,11 @@ def _kmeans_1d(values: torch.Tensor, clusters: int, iterations: int = 100) -> to
 
 def infer_anchor_statistics(annotation_path, target_min_size=960, max_size=1600, levels=5,
                             ignore_category_ids=()):
-    """Infer anchor scales/ratios from COCO boxes after detector-style resizing."""
+    """Suy ra scale/tỉ lệ anchor sau khi mô phỏng đúng phép resize của detector.
+
+    Kích thước đại diện của một hộp là ``sqrt(width * height)``. Giá trị này
+    được nhân với hệ số resize ảnh trước khi chạy k-means thành năm mức P2-P6.
+    """
     annotation_path = Path(annotation_path)
     with annotation_path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -81,6 +85,7 @@ def infer_anchor_statistics(annotation_path, target_min_size=960, max_size=1600,
 
 
 def resolve_anchor_sizes(config):
+    """Đọc anchor cố định hoặc tự tính anchor từ annotation train khi đặt ``auto``."""
     model_cfg = config["model"]
     configured = model_cfg.get("anchor_sizes", (16, 32, 64, 128, 256))
     if configured != "auto":

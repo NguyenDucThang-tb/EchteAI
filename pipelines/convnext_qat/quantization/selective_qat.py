@@ -1,9 +1,9 @@
-"""Eager selective QAT boundaries for ConvNeXt-FPN Faster R-CNN.
+"""QAT chọn lọc kiểu Eager cho Faster R-CNN dùng ConvNeXt-FPN.
 
-Every selected Conv/Linear is an INT8 island after conversion. Its input is
-quantized immediately before the operator and dequantized immediately after it.
-Consequently LayerNorm, GELU, residual addition, proposal code, ROI Align and ROI
-heads retain their normal FP32 tensors and kernels.
+Mỗi ``Conv2d``/``Linear`` được chọn là một "đảo INT8" độc lập sau khi convert:
+FP32 -> Quantize -> toán tử INT8 -> DeQuantize -> FP32. Vì vậy LayerNorm, GELU,
+phép cộng residual, giải mã proposal, ROI Align và ROI heads vẫn chạy bằng FP32.
+Đây là pipeline baseline dễ kiểm soát nhưng có thể tốn nhiều chi phí Q/DQ.
 """
 
 import copy
@@ -32,7 +32,7 @@ VARIANT_REGIONS = {
 
 
 class QuantizedOperation(nn.Module):
-    """Quant/operation/dequant island; QAT prepares and converts only this scope."""
+    """Bọc một toán tử thành vùng Quantize -> operation -> DeQuantize."""
 
     def __init__(self, operation):
         super().__init__()
@@ -41,10 +41,12 @@ class QuantizedOperation(nn.Module):
         self.dequant = DeQuantStub()
 
     def forward(self, x):
+        """Mô phỏng hoặc thực thi Q/DQ bao quanh toán tử."""
         return self.dequant(self.operation(self.quant(x)))
 
 
 def selective_qconfig():
+    """Tạo cấu hình W8A8: activation per-tensor và weight per-channel."""
     return QConfig(
         activation=FakeQuantize.with_args(
             observer=MovingAverageMinMaxObserver,
@@ -65,6 +67,7 @@ def selective_qconfig():
 
 
 def _wrap_operations(module, qconfig):
+    """Duyệt đệ quy và bọc mọi Conv/Linear thuộc vùng đã chọn."""
     for name, child in list(module.named_children()):
         if isinstance(child, QuantizedOperation):
             continue
@@ -77,6 +80,7 @@ def _wrap_operations(module, qconfig):
 
 
 def _validate_variant(variant):
+    """Chuẩn hóa và kiểm tra tên cấu hình M0-M4."""
     variant = str(variant).upper()
     if variant not in VARIANT_REGIONS:
         raise ValueError(f"Unknown QAT variant {variant!r}; choose {sorted(VARIANT_REGIONS)}")
@@ -84,6 +88,7 @@ def _validate_variant(variant):
 
 
 def _regions_from_module_names(module_names):
+    """Đổi tên module trong YAML thành tên vùng nội bộ của pipeline."""
     regions = set()
     for raw_name in module_names:
         name = str(raw_name).lower()
@@ -105,7 +110,11 @@ def _regions_from_module_names(module_names):
 def prepare_selective_qat(
     model, variant="M3", backend="auto", inplace=False, quantized_modules=None,
 ):
-    """Insert fake quant only into regions selected by M0-M4."""
+    """Chèn fake-quant vào đúng các vùng được chọn bởi M0-M4.
+
+    ``backend='auto'`` ưu tiên backend CPU phù hợp với runtime. ROI heads được
+    kiểm tra lại sau prepare để tránh lượng tử hóa ngoài ý muốn.
+    """
     variant = _validate_variant(variant)
     supported = list(torch.backends.quantized.supported_engines)
     requested_backend = str(backend).lower()
@@ -125,6 +134,7 @@ def prepare_selective_qat(
     torch.backends.quantized.engine = backend
     qat_model = model if inplace else copy.deepcopy(model)
     qat_model.qconfig = None
+    # Chọn vùng theo variant M0-M4 hoặc danh sách module cụ thể từ config.
     regions = (
         _regions_from_module_names(quantized_modules)
         if quantized_modules is not None
@@ -136,6 +146,7 @@ def prepare_selective_qat(
         return qat_model
     qconfig = selective_qconfig()
 
+    # Transform, decode, ROI và NMS không xuất hiện ở đây nên luôn giữ FP32.
     if "backbone" in regions:
         _wrap_operations(qat_model.backbone.body, qconfig)
     if "fpn" in regions:
@@ -162,7 +173,11 @@ def prepare_selective_qat(
 
 
 def set_qat_phase(model, phase):
-    """Configure calibration, weight-only warmup, full QAT, or frozen observers."""
+    """Thiết lập observer/fake-quant cho từng phase QAT.
+
+    ``calibration`` chỉ thu range; ``weight_only`` chỉ giả lập weight INT8;
+    ``full`` giả lập W8A8; ``frozen`` cố định range nhưng vẫn fake-quant.
+    """
     if phase not in {"calibration", "weight_only", "full", "frozen"}:
         raise ValueError("phase must be calibration, weight_only, full, or frozen")
     for name, module in model.named_modules():
@@ -176,7 +191,7 @@ def set_qat_phase(model, phase):
 
 
 def convert_selective_qat(model, inplace=False):
-    """Convert prepared islands to quantized CPU inference modules."""
+    """Convert các đảo đã prepare thành module INT8 để suy luận trên CPU."""
     converted = model if inplace else copy.deepcopy(model)
     converted.to("cpu").eval()
     if any(isinstance(module, QuantizedOperation) for module in converted.modules()):
@@ -185,4 +200,5 @@ def convert_selective_qat(model, inplace=False):
 
 
 def quantized_region_summary(model):
+    """Liệt kê tên các module đã thực sự được convert sang quantized module."""
     return [name for name, module in model.named_modules() if module.__class__.__module__.startswith("torch.ao.nn.quantized")]

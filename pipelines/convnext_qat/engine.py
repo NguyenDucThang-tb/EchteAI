@@ -1,3 +1,5 @@
+"""Vòng lặp train, benchmark và khởi tạo optimizer dùng chung cho các script."""
+
 import json
 import time
 from pathlib import Path
@@ -6,6 +8,7 @@ import torch
 
 
 def move_targets(targets, device):
+    """Chuyển toàn bộ tensor trong target detection sang thiết bị train."""
     return [{key: value.to(device) if torch.is_tensor(value) else value for key, value in target.items()} for target in targets]
 
 
@@ -13,6 +16,7 @@ def train_one_epoch(
     model, loader, optimizer, device, grad_clip_norm=0.0, print_frequency=20,
     iteration_scheduler=None, max_steps=None,
 ):
+    """Train một epoch (hoặc ``max_steps``), cộng bốn loss của Faster R-CNN."""
     model.train()
     total_loss = 0.0
     started = time.perf_counter()
@@ -20,6 +24,7 @@ def train_one_epoch(
         images = [image.to(device) for image in images]
         targets = move_targets(targets, device)
         losses = model(images, targets)
+        # Faster R-CNN trả dict loss RPN objectness/box và ROI class/box.
         loss = sum(losses.values())
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite loss at step {step}: {losses}")
@@ -51,7 +56,7 @@ def train_one_epoch(
 
 @torch.inference_mode()
 def benchmark_inference(model, loader, device, max_images=100):
-    """Run one inference pass over at most max_images and report throughput."""
+    """Chạy inference tối đa ``max_images`` và trả latency/FPS."""
     was_training = model.training
     model.eval()
     processed = 0
@@ -85,7 +90,7 @@ def benchmark_inference(model, loader, device, max_images=100):
 
 
 def append_epoch_benchmark(path, record):
-    """Persist benchmark history, replacing duplicate stage/epoch entries."""
+    """Ghi lịch sử benchmark, thay bản ghi cũ nếu trùng stage và epoch."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     history = []
@@ -104,6 +109,7 @@ def append_epoch_benchmark(path, record):
 
 
 def make_optimizer(model, config, qat=False):
+    """Tạo AdamW/SGD chỉ từ các tham số còn ``requires_grad``."""
     training = config["training"]
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     lr = float(training["qat_lr"] if qat else training["fp32_lr"])
@@ -117,5 +123,6 @@ def make_optimizer(model, config, qat=False):
 
 
 def set_optimizer_lr(optimizer, learning_rate):
+    """Đổi learning rate đồng thời cho mọi parameter group."""
     for group in optimizer.param_groups:
         group["lr"] = float(learning_rate)

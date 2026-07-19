@@ -1,4 +1,4 @@
-"""Small CPU smoke test; no dataset or pretrained download is required."""
+"""Smoke test Selective QAT nhỏ trên CPU, không cần dataset/pretrained."""
 
 import sys
 from pathlib import Path
@@ -18,6 +18,7 @@ from pipelines.convnext_qat.quantization.selective_qat import (
 
 
 def smoke_config():
+    """Tạo config detector tối thiểu cho phép thử nhanh."""
     return {
         "dataset": {"num_classes": 3},
         "model": {
@@ -38,6 +39,7 @@ def smoke_config():
 
 
 def main():
+    """Kiểm tra prepare, phase, forward/backward và convert INT8."""
     torch.set_num_threads(1)
     model = build_fasterrcnn_convnext(smoke_config())
     image = torch.rand(3, 64, 64)

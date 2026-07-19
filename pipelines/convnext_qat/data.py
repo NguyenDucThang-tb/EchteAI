@@ -1,4 +1,4 @@
-"""COCO detection dataset with contiguous training labels."""
+"""Dataset COCO cho detection với label train liên tục từ 1; label 0 là nền."""
 
 import json
 from collections import defaultdict
@@ -11,7 +11,10 @@ from torchvision.transforms import ColorJitter
 from torchvision.transforms.functional import pil_to_tensor
 
 class CocoDetectionDataset(torch.utils.data.Dataset):
+    """Đọc ảnh/annotation COCO và tạo target đúng định dạng Faster R-CNN."""
+
     def __init__(self, image_dir, annotation_path, training=False, augmentation=None):
+        """Lập chỉ mục ảnh, category và annotation một lần khi tạo dataset."""
         self.image_dir = Path(image_dir)
         self.annotation_path = Path(annotation_path)
         self.training = training
@@ -41,6 +44,7 @@ class CocoDetectionDataset(torch.utils.data.Dataset):
             ),
             key=lambda item: item["id"],
         )
+        # COCO category id có thể rời rạc; model cần label liên tục 1..N.
         self.category_id_to_label = {category["id"]: i + 1 for i, category in enumerate(categories)}
         self.label_to_category_id = {label: category for category, label in self.category_id_to_label.items()}
         self.label_to_name = {self.category_id_to_label[c["id"]]: c["name"] for c in categories}
@@ -58,6 +62,7 @@ class CocoDetectionDataset(torch.utils.data.Dataset):
         return len(self.images)
 
     def __getitem__(self, index):
+        """Trả ``image[C,H,W]`` trong [0,1] và target boxes dạng XYXY."""
         info = self.images[index]
         image_path = self.image_dir / info["file_name"]
         if not image_path.is_file():
@@ -82,6 +87,7 @@ class CocoDetectionDataset(torch.utils.data.Dataset):
             crowds.append(int(annotation.get("iscrowd", 0)))
         boxes_tensor = torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4)
         if self.training and torch.rand(()) < self.horizontal_flip_probability:
+            # Khi lật ảnh ngang, hai tọa độ x của mọi bounding box cũng phải đổi.
             image = image.flip(-1)
             old_x1 = boxes_tensor[:, 0].clone()
             old_x2 = boxes_tensor[:, 2].clone()
@@ -98,10 +104,12 @@ class CocoDetectionDataset(torch.utils.data.Dataset):
 
 
 def detection_collate(batch):
+    """Giữ ảnh dưới dạng list vì mỗi ảnh detection có kích thước và số hộp khác nhau."""
     return tuple(zip(*batch))
 
 
 def build_coco_loader(config, split, shuffle=None, limit=None, batch_size=None):
+    """Tạo DataLoader cho một split và xác nhận số lớp khớp annotation."""
     dataset_cfg = config["dataset"]
     dataset = CocoDetectionDataset(
         dataset_cfg[f"{split}_images"],
@@ -132,6 +140,7 @@ def build_coco_loader(config, split, shuffle=None, limit=None, batch_size=None):
 
 
 def unwrap_coco_dataset(dataset):
+    """Bỏ các lớp ``Subset`` để evaluator truy cập metadata COCO gốc."""
     while isinstance(dataset, Subset):
         dataset = dataset.dataset
     return dataset

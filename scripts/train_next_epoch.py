@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run exactly the next FP32, selective-QAT, or PT2E-QAT epoch, then exit."""
+"""Chạy đúng một epoch kế tiếp của FP32/Selective-QAT/PT2E-QAT rồi thoát."""
 
 import argparse
 import subprocess
@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args():
+    """Đọc stage, variant và giới hạn dữ liệu từ CLI."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--stage", choices=["fp32", "qat", "pt2e"], required=True)
@@ -28,6 +29,7 @@ def parse_args():
 
 
 def checkpoint_epoch(path):
+    """Đọc epoch đã hoàn thành trong checkpoint; trả 0 nếu file chưa có."""
     path = Path(path)
     if not path.is_file():
         return 0
@@ -36,6 +38,7 @@ def checkpoint_epoch(path):
 
 
 def main():
+    """Chọn script train phù hợp, tự resume checkpoint và chạy một epoch."""
     args = parse_args()
     config = load_config(args.config, require_dataset=True)
     if args.stage == "fp32":

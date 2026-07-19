@@ -1,4 +1,4 @@
-"""Backbone C2-C5 feature extraction with a torchvision FPN."""
+"""Trích xuất đặc trưng C2-C5 và xây dựng tháp đặc trưng FPN P2-P6."""
 
 from collections import OrderedDict
 
@@ -23,7 +23,7 @@ _VARIANTS = {
 
 
 class ConvNeXtFPNBackbone(nn.Module):
-    """Expose ConvNeXt stages as C2-C5 and return P2-P6 in an OrderedDict."""
+    """Backbone ConvNeXt: lấy bốn stage C2-C5 rồi chuẩn hóa bằng FPN."""
 
     def __init__(self, variant="convnext_tiny", out_channels=256, pretrained=True, trainable_layers=4):
         super().__init__()
@@ -43,8 +43,8 @@ class ConvNeXtFPNBackbone(nn.Module):
         self.pt2e_spatial_divisor = 32
         self.pt2e_region_kind = "convnext"
 
-        # A trainable stage includes the projection feeding it. This ensures that
-        # trainable_layers=4 also trains the stem and every downsample projection.
+        # Mỗi stage gồm projection đầu vào và các block; mở đủ bốn stage đồng
+        # nghĩa stem/downsample cũng nhận gradient.
         stage_groups = ((0, 1), (2, 3), (4, 5), (6, 7))
         trainable_stage_indices = {
             index
@@ -57,6 +57,7 @@ class ConvNeXtFPNBackbone(nn.Module):
                 parameter.requires_grad_(requires_grad)
 
     def forward(self, x: torch.Tensor):
+        """Nhận batch ``[N,3,H,W]`` và trả OrderedDict các mức P2-P6."""
         features = OrderedDict()
         for index, layer in enumerate(self.body):
             x = layer(x)
@@ -66,6 +67,7 @@ class ConvNeXtFPNBackbone(nn.Module):
 
 
 class _ResNetStem(nn.Module):
+    """Gói conv7x7 + BN + ReLU + max-pool đầu ResNet thành một stage."""
     def __init__(self, network):
         super().__init__()
         self.conv1 = network.conv1
@@ -74,6 +76,7 @@ class _ResNetStem(nn.Module):
         self.maxpool = network.maxpool
 
     def forward(self, x):
+        """Chạy lần lượt stem của ResNet."""
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -82,7 +85,7 @@ class _ResNetStem(nn.Module):
 
 
 class ResNetFPNBackbone(nn.Module):
-    """Expose ResNet stages as C2-C5 and return P2-P6 in an OrderedDict."""
+    """Backbone ResNet50 tương thích cùng giao diện C2-C5/P2-P6."""
 
     def __init__(self, variant="resnet50", out_channels=256, pretrained=True, trainable_layers=5):
         super().__init__()
@@ -116,6 +119,7 @@ class ResNetFPNBackbone(nn.Module):
                 parameter.requires_grad_(requires_grad)
 
     def forward(self, x: torch.Tensor):
+        """Chạy stem/layer1-4 rồi đưa bốn feature map qua FPN."""
         features = OrderedDict()
         for index, layer in enumerate(self.body):
             x = layer(x)
@@ -125,6 +129,7 @@ class ResNetFPNBackbone(nn.Module):
 
 
 def build_fpn_backbone(model_config):
+    """Factory chọn ConvNeXt hoặc ResNet50 theo ``model.backbone``."""
     variant = str(model_config.get("backbone", "convnext_tiny")).lower()
     common_kwargs = dict(
         out_channels=int(model_config.get("fpn_out_channels", 256)),
@@ -143,4 +148,5 @@ def build_fpn_backbone(model_config):
 
 
 def build_convnext_fpn_backbone(model_config):
+    """Alias tương thích code cũ; thực tế hỗ trợ cả ConvNeXt và ResNet50."""
     return build_fpn_backbone(model_config)

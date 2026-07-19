@@ -1,7 +1,10 @@
+"""Khai báo package, dependency cơ bản và dependency tùy chọn PT2E/COCO."""
+
 import os
 from setuptools import find_packages, setup
 
 
+# Chỉ đóng gói namespace pipeline hiện còn được dự án duy trì.
 packages = list(
     dict.fromkeys(
         find_packages(include=["pipelines", "pipelines.*"])

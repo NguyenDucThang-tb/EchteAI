@@ -1,3 +1,5 @@
+"""Tiện ích lưu/khôi phục checkpoint và đo kích thước mô hình."""
+
 import io
 from pathlib import Path
 
@@ -5,6 +7,7 @@ import torch
 
 
 def save_checkpoint(path, model, optimizer=None, epoch=0, metrics=None, extra=None, scheduler=None):
+    """Lưu đầy đủ trạng thái để có thể tiếp tục train đúng epoch kế tiếp."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -22,6 +25,7 @@ def save_checkpoint(path, model, optimizer=None, epoch=0, metrics=None, extra=No
 
 
 def load_checkpoint(path, model, optimizer=None, map_location="cpu", strict=True, scheduler=None):
+    """Nạp weight và, nếu được truyền vào, trạng thái optimizer/scheduler."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
@@ -36,11 +40,12 @@ def load_checkpoint(path, model, optimizer=None, map_location="cpu", strict=True
 
 
 def checkpoint_size_mb(path):
+    """Trả về kích thước thực của file checkpoint trên ổ đĩa theo MiB."""
     return Path(path).stat().st_size / (1024.0 * 1024.0)
 
 
 def model_state_size_mb(model):
-    """Serialized model-only size, excluding optimizer and training metadata."""
+    """Đo riêng state_dict của model, không tính optimizer và metadata train."""
     buffer = io.BytesIO()
     torch.save(model.state_dict(), buffer)
     return buffer.getbuffer().nbytes / (1024.0 * 1024.0)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark backbone-only FP32 vs PT2E INT8 with synthetic inputs."""
+"""Benchmark riêng backbone FP32 và PT2E INT8 bằng tensor đầu vào giả."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from pipelines.convnext_qat.quantization.pt2e_qat import (
 
 
 def parse_args():
+    """Đọc kích thước tensor và số vòng benchmark từ CLI."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--batch-size", type=int)
@@ -41,6 +42,7 @@ def parse_args():
 
 
 def benchmark_region(region, sample, warmup_iters, iters):
+    """Đo latency trung bình của một vùng graph trên CPU."""
     region = region.cpu().eval()
     timings = []
     with torch.inference_mode():
@@ -59,6 +61,7 @@ def benchmark_region(region, sample, warmup_iters, iters):
 
 
 def main():
+    """Prepare/convert PT2E rồi so tốc độ cùng một vùng và input FP32."""
     args = parse_args()
     config = load_config(args.config, require_dataset=False)
     random.seed(config.get("seed", 42))
@@ -82,6 +85,7 @@ def main():
     pt2e_model = build_fasterrcnn_convnext(config).cpu()
     pt2e_model = prepare_pt2e_backbone_qat(pt2e_model, config)
 
+    # Warmup observer bằng dữ liệu giả để qparam có giá trị trước khi convert.
     print("=== Observer warmup ===", flush=True)
     fake_quantizers = set_pt2e_qat_phase(pt2e_model, "observer_warmup")
     print(f"fake_quantizers observer_warmup={fake_quantizers}", flush=True)

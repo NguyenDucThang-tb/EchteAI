@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Train Faster R-CNN FP32 trên một GPU/CPU và lưu checkpoint mỗi epoch."""
 import argparse
 import random
 import sys
@@ -20,6 +21,7 @@ from pipelines.convnext_qat.models import build_fasterrcnn_convnext
 
 
 def parse_args():
+    """Đọc config, resume checkpoint và giới hạn dữ liệu."""
     parser = argparse.ArgumentParser(description="Train FP32 Faster R-CNN ConvNeXt-FPN")
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
     parser.add_argument("--limit", type=int, help="limit each split for a quick experiment")
@@ -32,6 +34,7 @@ def parse_args():
 
 
 def main():
+    """Dựng data/model/optimizer, train–validate và quản lý best/last."""
     args = parse_args()
     config = load_config(args.config, require_dataset=True)
     random.seed(config.get("seed", 42))

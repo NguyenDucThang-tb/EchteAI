@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print data-driven FPN anchors from a COCO training annotation file."""
+"""Thống kê bbox COCO và in bộ anchor FPN phù hợp với dữ liệu thật."""
 
 import argparse
 import json
@@ -14,6 +14,7 @@ from pipelines.convnext_qat.config import load_config
 
 
 def main():
+    """Đọc annotation/config rồi xuất kích thước anchor theo percentile."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--output")

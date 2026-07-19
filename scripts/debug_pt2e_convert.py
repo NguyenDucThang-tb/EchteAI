@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Debug PT2E quality across pre-convert, converted in-memory, and reloaded artifact."""
+"""Khoanh vùng lỗi PT2E giữa trước convert, sau convert và sau reload artifact."""
 
 import argparse
 import gc
@@ -29,6 +29,7 @@ from pipelines.convnext_qat.quantization import (
 
 
 def parse_args():
+    """Đọc checkpoint QAT, số ảnh kiểm tra và thiết bị chạy debug."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--qat-checkpoint", required=True)
@@ -45,6 +46,7 @@ def parse_args():
 
 
 def choose_device(name):
+    """Chọn CPU/CUDA và báo lỗi rõ nếu CUDA không tồn tại."""
     device = torch.device(name)
     if device.type != "cpu":
         raise ValueError(
@@ -55,6 +57,7 @@ def choose_device(name):
 
 
 def build_prepared_model(config, checkpoint, device):
+    """Dựng lại graph prepared rồi nạp checkpoint PT2E QAT."""
     model = build_fasterrcnn_convnext(config)
     model = prepare_pt2e_backbone_qat(model, config)
     payload = load_checkpoint(checkpoint, model, map_location="cpu")
@@ -65,6 +68,7 @@ def build_prepared_model(config, checkpoint, device):
 
 @torch.inference_mode()
 def sample_prediction_stats(model, loader, device, sample_images):
+    """Thu boxes/labels/scores vài ảnh để so sánh chi tiết từng stage."""
     records = []
     for index, (images, targets) in enumerate(loader):
         if index >= sample_images:
@@ -86,6 +90,7 @@ def sample_prediction_stats(model, loader, device, sample_images):
 
 
 def aggregate_score_stats(records):
+    """Tổng hợp score cao nhất và số detection từ các sample."""
     top1 = [item["top_scores"][0] for item in records if item["top_scores"]]
     pred_boxes = [item["pred_boxes"] for item in records]
     if not top1:
@@ -98,6 +103,7 @@ def aggregate_score_stats(records):
 
 
 def compare_sample_records(reference, candidate, atol=1e-5):
+    """So prediction của hai stage và báo độ lệch boxes/scores/labels."""
     """Compare deterministic samples and expose artifact reload corruption clearly."""
     if len(reference) != len(candidate):
         return {"equivalent": False, "reason": "sample_count", "max_abs_delta": float("inf")}
@@ -122,6 +128,7 @@ def compare_sample_records(reference, candidate, atol=1e-5):
 
 
 def evaluate_variant(name, model, config, device, limit, sample_images):
+    """Chạy metrics và sample diagnostics cho một biến thể model."""
     metrics = evaluate_model(
         model,
         build_coco_loader(config, "test", shuffle=False, limit=limit, batch_size=1),
@@ -144,6 +151,7 @@ def evaluate_variant(name, model, config, device, limit, sample_images):
 
 
 def main():
+    """Đánh giá ba stage và lưu báo cáo xác định convert hay reload làm sai."""
     args = parse_args()
     config = load_config(args.config, require_dataset=True)
     device = choose_device(args.device)

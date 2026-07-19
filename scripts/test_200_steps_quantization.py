@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train/benchmark a 200-step FP32 checkpoint, then smoke-test QAT and INT8."""
+"""Smoke test: train FP32 ngắn, QAT ngắn, convert INT8 và benchmark."""
 
 import argparse
 import copy
@@ -28,6 +28,7 @@ from pipelines.convnext_qat.quantization import (
 
 
 def parse_args():
+    """Đọc số step, số ảnh calibration/benchmark và variant QAT."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--steps", type=int, default=200)
@@ -40,6 +41,7 @@ def parse_args():
 
 @torch.inference_mode()
 def calibrate(model, loader, device, image_count):
+    """Cho observer xem đủ số ảnh trước khi bắt đầu fake-quant training."""
     model.eval()
     set_qat_phase(model, "calibration")
     observed = 0
@@ -56,6 +58,7 @@ def calibrate(model, loader, device, image_count):
 
 
 def main():
+    """Thực thi toàn bộ phép thử ngắn và lưu checkpoint/kết quả trung gian."""
     args = parse_args()
     if min(args.steps, args.benchmark_images, args.calibration_images, args.qat_batch_size) <= 0:
         raise ValueError("steps and image counts must be positive")

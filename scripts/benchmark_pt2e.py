@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare FP32, eager-island INT8, and PT2E backbone INT8 on x86 CPU."""
+"""So sánh FP32, Eager-island INT8 và PT2E-backbone INT8 trên CPU x86."""
 
 import argparse
 import gc
@@ -25,6 +25,7 @@ from pipelines.convnext_qat.quantization import (
 
 
 def main():
+    """Đánh giá accuracy và latency công bằng trên cùng số lượng ảnh."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--fp32-checkpoint", required=True)
@@ -71,6 +72,7 @@ def main():
         del eager
         gc.collect()
 
+    # Artifact loader kiểm tra cả Q/DQ graph và chữ ký kiến trúc trước benchmark.
     pt2e, artifact = load_pt2e_int8_artifact(args.pt2e_int8_checkpoint, config)
     print("Evaluating converted PT2E INT8 artifact before latency benchmark...", flush=True)
     pt2e_accuracy = evaluate_model(

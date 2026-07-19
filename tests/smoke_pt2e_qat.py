@@ -1,4 +1,4 @@
-"""CPU end-to-end PT2E QAT, resume, convert, artifact and inference smoke test."""
+"""Smoke test PT2E QAT end-to-end: resume, convert, artifact và inference CPU."""
 
 import os
 import sys
@@ -20,6 +20,7 @@ from pipelines.convnext_qat.quantization import (
 
 
 def config(backbone="convnext_tiny"):
+    """Tạo config tối thiểu, không tải pretrained weight/dataset."""
     return {
         "dataset": {"num_classes": 3},
         "model": {
@@ -40,10 +41,12 @@ def config(backbone="convnext_tiny"):
 
 
 def prepared(cfg):
+    """Dựng detector nhỏ và prepare vùng PT2E."""
     return prepare_pt2e_backbone_qat(build_fasterrcnn_convnext(cfg), cfg)
 
 
 def main():
+    """Kiểm tra backward, checkpoint, phase, convert, save/reload và shape động."""
     torch.set_num_threads(1)
     assert [pt2e_qat_phase(i, 3, 1, 1) for i in range(3)] == [
         "observer_warmup", "full", "frozen",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run FP32 and selective-INT8 Faster R-CNN on a video side by side."""
+"""Chạy Faster R-CNN FP32 và Selective-INT8 song song trên video."""
 
 import argparse
 import json
@@ -24,6 +24,7 @@ COLORS = [(0, 220, 0), (0, 180, 255), (255, 120, 0), (255, 0, 180), (180, 255, 0
 
 
 def parse_args():
+    """Đọc đường dẫn video/checkpoint và tùy chọn lọc frame."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
     parser.add_argument("--fp32-checkpoint", required=True)
@@ -42,6 +43,7 @@ def parse_args():
 
 
 def annotate(frame, prediction, title, latency_ms, threshold, labels):
+    """Vẽ bbox, nhãn, score và latency lên một frame."""
     canvas = frame.copy()
     boxes = prediction["boxes"].detach().cpu().numpy()
     scores = prediction["scores"].detach().cpu().numpy()
@@ -69,6 +71,7 @@ def annotate(frame, prediction, title, latency_ms, threshold, labels):
 
 @torch.inference_mode()
 def predict(model, image, device):
+    """Tiền xử lý một frame, suy luận và trả prediction cùng latency."""
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     started = time.perf_counter()
@@ -79,6 +82,7 @@ def predict(model, image, device):
 
 
 def main():
+    """Đọc video, suy luận hai model và ghi video so sánh hai khung."""
     args = parse_args()
     if args.threads <= 0 or args.frame_stride <= 0 or args.progress_frequency <= 0:
         raise ValueError("threads, frame-stride and progress-frequency must be positive")

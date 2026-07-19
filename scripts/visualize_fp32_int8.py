@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create GT/FP32/INT8 side-by-side detection visualizations."""
+"""Tạo ảnh trực quan GT/FP32/INT8 đặt cạnh nhau để đối chiếu detection."""
 
 import argparse
 import json
@@ -24,6 +24,7 @@ COLORS = {"gt": "#22c55e", "fp32": "#3b82f6", "int8": "#f97316"}
 
 
 def parse_args():
+    """Đọc checkpoint, ngưỡng score, số ảnh và thư mục đầu ra."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--fp32-checkpoint", required=True)
@@ -37,10 +38,12 @@ def parse_args():
 
 
 def label_name(label, names):
+    """Đổi category id thành tên hiển thị, có fallback khi thiếu mapping."""
     return names.get(int(label), f"class_{int(label)}")
 
 
 def draw_panel(image, boxes, labels, scores, names, title, color, threshold=0.0, max_detections=100):
+    """Vẽ một panel bbox sau khi lọc score và giới hạn số detection."""
     panel = to_pil_image(image.cpu()).convert("RGB")
     draw = ImageDraw.Draw(panel)
     font = ImageFont.load_default()
@@ -64,6 +67,7 @@ def draw_panel(image, boxes, labels, scores, names, title, color, threshold=0.0,
 
 
 def combine_panels(panels):
+    """Ghép các ảnh PIL cùng chiều cao theo phương ngang."""
     width = sum(panel.width for panel in panels)
     height = max(panel.height for panel in panels)
     combined = Image.new("RGB", (width, height), "white")
@@ -76,6 +80,7 @@ def combine_panels(panels):
 
 @torch.inference_mode()
 def predict(model, image, device):
+    """Chạy suy luận một ảnh và đưa tensor kết quả về CPU."""
     started = time.perf_counter()
     prediction = model([image.to(device)])[0]
     elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -83,6 +88,7 @@ def predict(model, image, device):
 
 
 def main():
+    """Sinh 100 ảnh so sánh (hoặc số ảnh CLI) và file manifest JSON."""
     args = parse_args()
     if args.images <= 0 or args.threads <= 0:
         raise ValueError("images and threads must be positive")

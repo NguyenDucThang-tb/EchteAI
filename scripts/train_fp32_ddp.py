@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Distributed FP32 training for multi-GPU Kaggle sessions.
+"""Train FP32 phân tán bằng DDP cho phiên Kaggle nhiều GPU.
 
 Launch example:
     python -m torch.distributed.run --standalone --nproc_per_node=2 \
@@ -41,6 +41,7 @@ from pipelines.convnext_qat.models import build_fasterrcnn_convnext  # noqa: E40
 
 
 def parse_args():
+    """Đọc config, checkpoint resume và số epoch của lần chạy hiện tại."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--limit", type=int)
@@ -58,6 +59,7 @@ def parse_args():
 
 
 def setup_distributed():
+    """Khởi tạo NCCL process group và gán mỗi rank vào một GPU."""
     if "LOCAL_RANK" not in os.environ:
         raise RuntimeError("train_fp32_ddp.py must be launched with torch.distributed.run/torchrun")
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -75,16 +77,19 @@ def setup_distributed():
 
 
 def cleanup_distributed():
+    """Đóng process group sau khi mọi rank hoàn tất."""
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
 
 
 def rank0_print(rank, *values):
+    """Chỉ in log ở rank 0 để tránh trùng dòng."""
     if rank == 0:
         print(*values, flush=True)
 
 
 def build_distributed_loader(config, split, rank, world_size, limit=None, batch_size=None):
+    """Tạo DataLoader cùng DistributedSampler cho từng rank."""
     dataset_cfg = config["dataset"]
     dataset = CocoDetectionDataset(
         dataset_cfg[f"{split}_images"],
@@ -121,6 +126,7 @@ def build_distributed_loader(config, split, rank, world_size, limit=None, batch_
 
 
 def move_targets(targets, device):
+    """Chuyển toàn bộ tensor trong target sang GPU của rank hiện tại."""
     return [
         {key: value.to(device) if torch.is_tensor(value) else value for key, value in target.items()}
         for target in targets
@@ -128,6 +134,7 @@ def move_targets(targets, device):
 
 
 def reduce_train_metrics(loss_sum, steps, seconds, device):
+    """All-reduce loss/step/time để tạo thống kê chung cho các GPU."""
     values = torch.tensor([loss_sum, float(steps), seconds], device=device)
     dist.all_reduce(values, op=dist.ReduceOp.SUM)
     total_loss, total_steps, summed_seconds = values.tolist()
@@ -151,6 +158,7 @@ def train_one_epoch_ddp(
     print_frequency=20,
     iteration_scheduler=None,
 ):
+    """Train một epoch DDP, warmup LR và ghi log tiến độ ở rank 0."""
     sampler.set_epoch(epoch)
     model.train()
     total_loss = 0.0
@@ -192,11 +200,13 @@ def train_one_epoch_ddp(
 
 
 def broadcast_buffers_from_rank0(module):
+    """Đồng bộ buffer model từ rank 0 trước validation/checkpoint."""
     for buffer in module.buffers():
         dist.broadcast(buffer, src=0)
 
 
 def main():
+    """Điều phối toàn bộ vòng train FP32 DDP và validation trên rank 0."""
     args = parse_args()
     local_rank, rank, world_size, device = setup_distributed()
     try:
