@@ -78,6 +78,14 @@ quantization:
     # Small representative tensors keep export cheap; H/W remain dynamic.
     example_height: 256
     example_width: 320
+  compiler:
+    # TensorRT hybrid deploy: export backbone by default, keep FPN/RPN/ROI in PyTorch.
+    scope: backbone
+    example_batch_size: 1
+    example_height: 960
+    example_width: 1600
+    artifact_dir: /content/drive/MyDrive/EchteAI/seadronessee_m3/tensorrt_artifacts
+    benchmark_json: /content/drive/MyDrive/EchteAI/seadronessee_m3/tensorrt_hybrid_benchmark.json
   phase_learning_rates:
     weight_only: 0.0001
     full: 0.00005

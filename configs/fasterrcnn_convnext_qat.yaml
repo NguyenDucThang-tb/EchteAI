@@ -68,6 +68,14 @@ quantization:
     maximum_image_side: 1024
     example_height: 256
     example_width: 320
+  compiler:
+    # TensorRT hybrid deploy: export backbone by default, keep FPN/RPN/ROI in PyTorch.
+    scope: backbone
+    example_batch_size: 1
+    example_height: 960
+    example_width: 1600
+    artifact_dir: outputs/convnext_qat/tensorrt_artifacts
+    benchmark_json: outputs/convnext_qat/tensorrt_hybrid_benchmark.json
   phase_learning_rates:
     weight_only: 0.0001
     full: 0.00005

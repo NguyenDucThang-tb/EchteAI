@@ -229,6 +229,19 @@ Nhánh DDP trong [train_qat_ddp.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_q
 
 Repo cũng có một nhánh PT2E graph trong [train_pt2e_qat.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_pt2e_qat.py) và [pt2e_qat.py](D:/Quanti_FasterRCNN/EchteAI/pipelines/convnext_qat/quantization/pt2e_qat.py). Mục tiêu của nhánh này là giảm overhead eager island bằng graph quantization cho phần backbone hoặc backbone+FPN. Tuy nhiên trong thực tế nó đòi hỏi môi trường phần mềm sạch và ổn định hơn, nên hiện tại eager selective QAT vẫn là baseline dễ vận hành nhất trong các notebook runtime bị giới hạn.
 
+## TensorRT hybrid cho ConvNeXt
+
+Repo hiện có thêm đường deploy TensorRT cho nhánh ConvNeXt selective QAT. Đường này không thay đổi quá trình train hiện tại. Sau khi đã có `fp32_best.pt` và `qat_best.pt` hoặc `qat_last.pt`, ta export riêng vùng backbone/backbone+FPN sang ONNX, build TensorRT engine, rồi benchmark theo dạng hybrid:
+
+```text
+image CUDA
+  -> TensorRT ConvNeXt backbone
+  -> PyTorch FPN / RPN / RoI heads / NMS
+  -> detections
+```
+
+Mặc định config dùng `quantization.compiler.scope: backbone`, nghĩa là chỉ backbone body chạy TensorRT, còn FPN và detector heads vẫn chạy PyTorch để giữ pipeline ổn định. Đây là cách thực dụng để INT8 chạy được trên GPU NVIDIA mà không cần export toàn bộ Faster R-CNN, vì RPN decode, RoIAlign và NMS khó đưa vào TensorRT end-to-end.
+
 ## Ví dụ lệnh chạy
 
 Huấn luyện baseline FP32:
@@ -271,6 +284,59 @@ python scripts/compare_fp32_int8.py \
   --int8-checkpoint /path/to/selective_int8.pt \
   --images 100 \
   --threads 1
+```
+
+Export backbone FP32 sang ONNX:
+
+```bash
+python scripts/export_convnext_tensorrt_onnx.py \
+  --config configs/seadronessee_colab.yaml \
+  --model fp32 \
+  --fp32-checkpoint /path/to/fp32_best.pt \
+  --output /path/to/convnext_backbone_fp32.onnx \
+  --height 960 \
+  --width 1600
+```
+
+Export backbone selective-QAT sang ONNX Q/DQ cho TensorRT INT8:
+
+```bash
+python scripts/export_convnext_tensorrt_onnx.py \
+  --config configs/seadronessee_colab.yaml \
+  --model qat_graph \
+  --qat-checkpoint /path/to/qat_best.pt \
+  --output /path/to/convnext_backbone_qat.onnx \
+  --height 960 \
+  --width 1600 \
+  --tensorrt-friendly-int8
+```
+
+Build TensorRT engine:
+
+```bash
+python scripts/build_tensorrt_engine.py \
+  --onnx /path/to/convnext_backbone_fp32.onnx \
+  --engine /path/to/convnext_backbone_fp32.engine \
+  --precision fp32
+
+python scripts/build_tensorrt_engine.py \
+  --onnx /path/to/convnext_backbone_qat.onnx \
+  --engine /path/to/convnext_backbone_int8.engine \
+  --precision int8
+```
+
+Benchmark FP32 TensorRT hybrid và INT8 TensorRT hybrid trên 100 ảnh:
+
+```bash
+python scripts/benchmark_convnext_tensorrt_hybrid.py \
+  --config configs/seadronessee_colab.yaml \
+  --fp32-engine /path/to/convnext_backbone_fp32.engine \
+  --int8-engine /path/to/convnext_backbone_int8.engine \
+  --fp32-checkpoint /path/to/fp32_best.pt \
+  --qat-checkpoint /path/to/qat_best.pt \
+  --images 100 \
+  --height 960 \
+  --width 1600
 ```
 
 ## Bảng kết quả để tự điền
