@@ -138,6 +138,12 @@ def main():
 
     onnx_path = Path(args.output) if args.output else artifact_dir / f"convnext_{scope}_{args.model}.onnx"
     metadata_path = onnx_path.with_name(f"{onnx_path.stem}_metadata.json")
+    # Với checkpoint QAT eager, các module FakeQuantize vẫn chứa nhánh:
+    # ``if self.observer_enabled[0] == 1``. Exporter mới dựa trên
+    # ``torch.export`` coi điều kiện này là data-dependent guard và có thể lỗi
+    # ``GuardOnDataDependentSymNode`` dù observer đã bị freeze. Legacy tracer
+    # sẽ hằng-hoá trạng thái frozen hiện tại và xuất các fake-quant op sang
+    # ONNX ổn định hơn cho TensorRT Q/DQ workflow.
     torch.onnx.export(
         target_module,
         (sample,),
@@ -146,6 +152,7 @@ def main():
         output_names=output_names,
         opset_version=int(args.opset),
         do_constant_folding=True,
+        dynamo=False,
     )
 
     normalized_zero_points = 0
@@ -174,4 +181,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
