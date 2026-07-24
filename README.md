@@ -256,55 +256,55 @@ Kết quả cho thấy hai cấu hình INT8 đều cải thiện tốc độ suy
 
 ## 11. PascalVOC benchmark
 
-Ph?n n?y ???c b? sung ?? ki?m tra t?nh t?ng qu?t c?a pipeline ResNet50 Faster R-CNN tr??c khi quay l?i t?i ?u cho SeaDronesSee. To?n b? k?t qu? d??i ??y ???c b?o c?o tr?n `100 sample` test c?a PascalVOC.
+This section is added to verify that the ResNet50 Faster R-CNN pipeline is not overfitted to SeaDronesSee before returning to small-object optimization. All results below are reported on `100 test samples` from PascalVOC.
 
 ### 11.1 Dataset
 
-PascalVOC l? b? d? li?u detection ph? bi?n, g?m `20 foreground class` v? `1 background class`, c? nhi?u k?ch th??c v?t th? v? b?i c?nh kh?c nhau h?n SeaDronesSee. B? d? li?u n?y ???c d?ng ?? ki?m tra xem pipeline ResNet50 hi?n t?i c? h?c ???c detector t?ng qu?t, h?i t? ?n ??nh v? gi? ???c ch?t l??ng sau quantization hay kh?ng.
+PascalVOC is a widely used object detection benchmark with `20 foreground classes` and `1 background class`. Compared with SeaDronesSee, it contains more diverse object scales and scene contexts. We use it here to test whether the current ResNet50 pipeline can learn a general detector, converge stably, and preserve reasonable quality after quantization.
 
-Trong c?c th? nghi?m n?y, model ???c train v? ??nh gi? v?i:
+Experimental setup in this benchmark:
 
 - backbone: `ResNet50-FPN`
 - detector: `Faster R-CNN`
-- s? class: `21` (20 foreground + background)
-- resize policy c?a detector: `min_size = 800`, `max_size = 1333`
+- number of classes: `21` (20 foreground + background)
+- detector resize policy: `min_size = 800`, `max_size = 1333`
 
-### 11.2 Convergence of FP32 baseline
+### 11.2 Convergence of the FP32 baseline
 
-???ng cong FP32 cho th?y qu? tr?nh t?i ?u h?i t? r? r?ng trong 10 epoch ??u. Train loss gi?m ??u, trong khi `mAP@50:95` v? `mAP@50` t?ng nhanh ? giai ?o?n ??u v? ??t ??nh t?i epoch 8.
+The FP32 curve shows clear convergence within the first 10 epochs. Training loss decreases steadily, while `mAP@50:95` and `mAP@50` improve rapidly in the early phase and peak at epoch 8.
 
 ![FP32 PascalVOC convergence](./docs/figures/fp32_pascalvoc_10epoch_curves.png)
 
-T?m t?t:
+Summary:
 
-- best FP32 epoch trong 10 epoch ??u: `epoch 8`
+- best FP32 epoch within the first 10 epochs: `epoch 8`
 - best `mAP@50:95 = 0.4501`
 - best `mAP@50 = 0.7617`
 
 ### 11.3 Convergence of QAT eager
 
-QAT eager ???c hu?n luy?n theo hai pha:
+QAT eager is trained in two phases:
 
 - `epoch 1-2`: `weight_only`
 - `epoch 3-5`: `full`
 
-???ng cong d??i ??y cho th?y sau khi chuy?n sang pha `full`, `mAP@50:95` t?ng th?m v? ??t ??nh t?i epoch 4, sau ?? gi?m nh? ? epoch 5. ?i?u n?y cho th?y backbone ?? th?ch nghi ???c v?i fake-quant, nh?ng ch?t l??ng v?n th?p h?n baseline FP32.
+The curve below shows that after switching to the `full` phase, `mAP@50:95` improves further and peaks at epoch 4, then drops slightly at epoch 5. This indicates that the backbone has adapted to fake quantization, but the final quality still remains below the FP32 baseline.
 
 ![QAT PascalVOC convergence](./docs/figures/qat_pascalvoc_5epoch_curves.png)
 
-T?m t?t:
+Summary:
 
-- best QAT epoch trong 5 epoch ghi nh?n: `epoch 4`
+- best QAT epoch within the recorded 5 epochs: `epoch 4`
 - best `mAP@50:95 = 0.4320`
 - best `mAP@50 = 0.7272`
 
 ### 11.4 Accuracy comparison: FP32 vs QAT eager vs INT8 eager
 
-B?ng d??i ??y t?ng h?p k?t qu? ch?t l??ng c?a ba c?u h?nh:
+The table below summarizes the quality of three configurations:
 
-- `FP32 full`: detector ??y ?? PyTorch
-- `QAT eager`: detector ?? train v?i QAT eager
-- `INT8 eager`: model INT8 eager sau convert
+- `FP32 full`: full detector in PyTorch
+- `QAT eager`: detector trained with eager QAT
+- `INT8 eager`: eager INT8 model after conversion
 
 | Metric | FP32 full | QAT eager | INT8 eager | dQAT-FP32 | dINT8-FP32 |
 |---|---:|---:|---:|---:|---:|
@@ -319,16 +319,16 @@ B?ng d??i ??y t?ng h?p k?t qu? ch?t l??ng c?a ba c?u h?nh:
 | Mean IoU | 0.7966 | 0.8147 | 0.8155 | 0.0181 | 0.0189 |
 | F1 | 0.6848 | 0.6764 | 0.6376 | -0.0084 | -0.0472 |
 
-Nh?n x?t ch?nh:
+Main observations:
 
-- `FP32 full` v?n l? baseline ch?t l??ng cao nh?t theo `mAP@50:95` v? `mAP@50`.
-- `QAT eager` gi? ch?t l??ng kh? s?t FP32; m?c gi?m `mAP@50:95` ch? `0.0453`.
-- `INT8 eager` gi?m th?m v? mAP t?ng th?, nh?ng v?n gi? ???c kh? t?t ? `AP small`, cho th?y ???ng quantization n?y v?n c? gi? tr? trong b?i to?n v?t th? nh?.
-- `QAT eager` v? `INT8 eager` ??u c? `Mean IoU` cao h?n FP32, nh?ng `Recall` gi?m r?, ngh?a l? model l??ng t? h?a c? xu h??ng d? ?o?n ?t box h?n nh?ng localization tr?n c?c box gi? l?i v?n kh? ch?t.
+- `FP32 full` remains the highest-quality baseline in terms of both `mAP@50:95` and `mAP@50`.
+- `QAT eager` stays relatively close to FP32, with only `0.0453` drop in `mAP@50:95`.
+- `INT8 eager` reduces overall mAP further, but still retains a reasonable `AP small`, which suggests that this quantization path still has value for small-object detection.
+- Both `QAT eager` and `INT8 eager` achieve higher `Mean IoU` than FP32, while `Recall` drops noticeably. This suggests that the quantized models tend to produce fewer detections, but localization quality on the retained boxes remains relatively tight.
 
 ### 11.5 Memory efficiency
 
-Th? nghi?m k?ch th??c m? h?nh cho th?y l?i ?ch deploy r? r?ng c?a eager INT8:
+Model size measurement shows a clear deployment benefit for eager INT8:
 
 | Model | Full model size |
 |---|---:|
@@ -337,13 +337,13 @@ Th? nghi?m k?ch th??c m? h?nh cho th?y l?i ?ch deploy r? r?ng c?a eager INT8:
 
 - size reduction: `51.23%`
 
-K?t qu? n?y cho th?y eager INT8 gi?m h?n m?t n?a k?ch th??c m? h?nh so v?i FP32, ??i l?i b?ng m?c suy gi?m nh?t ??nh v? `mAP`. V? v?y, trong ph?m vi PascalVOC, `QAT eager` l? ?i?m c?n b?ng t?t h?n n?u ?u ti?n accuracy, c?n `INT8 eager` ph? h?p h?n khi ?u ti?n footprint v? deployment cost.
+This result shows that eager INT8 cuts model size by more than half compared with FP32, at the cost of a measurable drop in `mAP`. Therefore, within the PascalVOC setting, `QAT eager` is the better trade-off when accuracy is the priority, while `INT8 eager` is more suitable when footprint and deployment cost are the main constraints.
 
 ### 11.6 Experimental takeaway
 
-Th? nghi?m PascalVOC cho th?y:
+The PascalVOC experiment shows that:
 
-1. Pipeline FP32 ResNet50 Faster R-CNN h?i t? t?t v? ??t baseline ?n ??nh tr?n b? d? li?u t?ng qu?t.
-2. QAT eager l? h??ng kh? kh? thi: ?? ch?nh accuracy so v?i FP32 kh?ng l?n, trong khi m? h?nh ?? h?c th?ch nghi v?i fake-quant.
-3. INT8 eager gi?m k?ch th??c m? h?nh r?t m?nh, nh?ng v?n tr? gi? b?ng suy gi?m `mAP`, ??c bi?t l? tr?n `mAP@50:95` t?ng th?.
-4. PascalVOC l? b?ng ch?ng r?ng pipeline hi?n t?i kh?ng ch? h?p cho SeaDronesSee m? c?n ho?t ??ng ???c tr?n b? d? li?u detection ph? bi?n, t?o n?n m?t baseline th?c nghi?m h?p l? cho c?c b??c nghi?n c?u graph/PT2E v? TensorRT ti?p theo.
+1. The FP32 ResNet50 Faster R-CNN pipeline converges well and provides a stable baseline on a general-purpose detection dataset.
+2. Eager QAT is a practical direction: the accuracy gap to FP32 is moderate, while the model successfully adapts to fake quantization.
+3. Eager INT8 delivers a large reduction in model size, but still pays a visible price in `mAP`, especially in overall `mAP@50:95`.
+4. PascalVOC provides evidence that the current pipeline is not limited to SeaDronesSee and can also operate on a standard detection benchmark, giving a reasonable experimental baseline for later graph/PT2E and TensorRT studies.
