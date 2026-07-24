@@ -306,15 +306,15 @@ Tóm tắt:
 - best `mAP@50:95 = 0.4320`
 - best `mAP@50 = 0.7272`
 
-### 11.4 Accuracy comparison: FP32 vs QAT eager vs INT8 eager
+### 11.4 Accuracy comparison: FP32 vs QAT vs INT8
 
 Bảng dưới đây tổng hợp kết quả chất lượng của ba cấu hình:
 
 - `FP32 full`: detector đầy đủ PyTorch
-- `QAT eager`: detector đã train với QAT eager
-- `INT8 eager`: model INT8 eager sau convert
+- `QAT`: detector đã train với QAT
+- `INT8`: model INT8 sau convert
 
-| Metric | FP32 full | QAT eager | INT8 eager | dQAT-FP32 | dINT8-FP32 |
+| Metric | FP32 full | QAT | INT8 | dQAT-FP32 | dINT8-FP32 |
 |---|---:|---:|---:|---:|---:|
 | mAP@50:95 | 0.4783 | 0.4330 | 0.3693 | -0.0453 | -0.1090 |
 | mAP@50 | 0.7655 | 0.6938 | 0.6170 | -0.0717 | -0.1485 |
@@ -326,26 +326,29 @@ Bảng dưới đây tổng hợp kết quả chất lượng của ba cấu hì
 | Accuracy | 0.5207 | 0.5110 | 0.4680 | -0.0096 | -0.0526 |
 | Mean IoU | 0.7966 | 0.8147 | 0.8155 | 0.0181 | 0.0189 |
 | F1 | 0.6848 | 0.6764 | 0.6376 | -0.0084 | -0.0472 |
+| Avg inference (ms/img) | 165.54 | 160.23 | 110.41 | -5.31 | -55.13 |
+| FPS | 6.04 | 6.24 | 9.06 | 0.20 | 3.02 |
+| Speedup vs FP32 | 1.00× | 1.03× | 1.50× | - | - |
 
 Nhận xét chính:
 
 - `FP32 full` vẫn là baseline chất lượng cao nhất theo `mAP@50:95` và `mAP@50`.
-- `QAT eager` giữ chất lượng khá sát FP32; mức giảm `mAP@50:95` chỉ `0.0453`.
-- `INT8 eager` giảm thêm về mAP tổng thể, nhưng vẫn giữ được khá tốt ở `AP small`, cho thấy đường quantization này vẫn có giá trị trong bài toán vật thể nhỏ.
-- `QAT eager` và `INT8 eager` đều có `Mean IoU` cao hơn FP32, nhưng `Recall` giảm rõ, nghĩa là model lượng tử hóa có xu hướng dự đoán ít box hơn nhưng localization trên các box giữ lại vẫn khá chặt.
+- `QAT` giữ chất lượng khá sát FP32; mức giảm `mAP@50:95` chỉ `0.0453`.
+- `INT8` giảm thêm về mAP tổng thể, nhưng vẫn giữ được khá tốt ở `AP small`, cho thấy đường quantization này vẫn có giá trị trong bài toán vật thể nhỏ.
+- `QAT` và `INT8` đều có `Mean IoU` cao hơn FP32, nhưng `Recall` giảm rõ, nghĩa là model lượng tử hóa có xu hướng dự đoán ít box hơn nhưng localization trên các box giữ lại vẫn khá chặt.
 
 ### 11.5 Memory efficiency
 
-Thử nghiệm kích thước mô hình cho thấy lợi ích deploy rõ ràng của eager INT8:
+Thử nghiệm kích thước mô hình cho thấy lợi ích deploy rõ ràng của INT8:
 
 | Model | Full model size |
 |---|---:|
 | FP32 full | 171.99 MB |
-| INT8 eager | 83.89 MB |
+| INT8 | 83.89 MB |
 
 - size reduction: `51.23%`
 
-Kết quả này cho thấy eager INT8 giảm hơn một nửa kích thước mô hình so với FP32, đổi lại bằng mức suy giảm nhất định về `mAP`. Vì vậy, trong phạm vi PascalVOC, `QAT eager` là điểm cân bằng tốt hơn nếu ưu tiên accuracy, còn `INT8 eager` phù hợp hơn khi ưu tiên footprint và deployment cost.
+Kết quả này cho thấy INT8 giảm hơn một nửa kích thước mô hình so với FP32, đổi lại bằng mức suy giảm nhất định về `mAP`. Vì vậy, trong phạm vi PascalVOC, `QAT` là điểm cân bằng tốt hơn nếu ưu tiên accuracy, còn `INT8` phù hợp hơn khi ưu tiên footprint và deployment cost.
 
 ### 11.6 Experimental takeaway
 
