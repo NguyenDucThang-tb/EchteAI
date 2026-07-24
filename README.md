@@ -141,6 +141,66 @@ Cách này dễ train, dễ debug và phù hợp làm baseline. Nhược điểm
 
 Kết quả này cho thấy selective INT8 giúp giảm kích thước model rõ rệt, nhưng tốc độ CPU end-to-end chỉ cải thiện nhẹ vì detector vẫn còn nhiều phần FP32 và postprocess nặng.
 
+### 2.6. Benchmark SeaDronesSee: FP32 GPU vs INT8 TensorRT hybrid GPU
+
+Sau nhánh CPU baseline, repo có thêm notebook benchmark TensorRT cho SeaDronesSee:
+
+```text
+kaggle/SeaDronesSee_FP32_INT8_Visual_Benchmark.ipynb
+```
+
+Benchmark này dùng checkpoint từ Kaggle Dataset:
+
+```text
+nguyenducthangtb/echteai-seadronessee-m3-checkpoints
+```
+
+Checkpoint sử dụng:
+
+```text
+FP32: fp32_last.pt
+QAT:  qat_last.pt
+INT8 TensorRT engine: seadronessee_convnext_int8.engine
+```
+
+Kiến trúc benchmark:
+
+```text
+FP32 baseline:
+  image CUDA
+    -> Faster R-CNN PyTorch CUDA
+    -> detections
+
+INT8 TensorRT hybrid:
+  image CUDA [1, 3, 960, 1600]
+    -> TensorRT INT8 ConvNeXt backbone
+    -> PyTorch CUDA FPN
+    -> PyTorch CUDA RPN
+    -> PyTorch CUDA RoI Heads + NMS
+    -> detections
+```
+
+Kết quả benchmark trên 1000 ảnh validation SeaDronesSee:
+
+| Metric | FP32 PyTorch GPU | INT8 TensorRT hybrid GPU |
+|---|---:|---:|
+| mAP@50:95 | 0.4920 | 0.5039 |
+| mAP@50 | 0.8619 | 0.8716 |
+| AP@75 | 0.4850 | 0.4960 |
+| AP small | 0.4600 | 0.4930 |
+| AP medium | 0.5270 | 0.5250 |
+| AP large | 0.6230 | 0.6230 |
+| Latency | 217.47 ms/img | 167.52 ms/img |
+| FPS | 4.60 | 5.97 |
+| Speedup | 1.0000x | 1.2982x |
+
+Nhận xét:
+
+- TensorRT hybrid giúp giảm latency từ `217.47 ms/img` xuống `167.52 ms/img`.
+- Tốc độ tăng từ `4.60 FPS` lên `5.97 FPS`, tương đương `1.2982x`.
+- mAP của INT8 TensorRT hybrid nhỉnh hơn FP32 trong run này. Cách hiểu hợp lý là checkpoint QAT đã được fine-tune thêm và benchmark dùng input cố định `960 x 1600`, không nên kết luận INT8 luôn chính xác hơn FP32 trong mọi điều kiện.
+- Vì chỉ backbone chạy TensorRT, còn FPN/RPN/RoI/NMS vẫn chạy PyTorch CUDA, speedup end-to-end thấp hơn mức tăng tốc riêng của backbone.
+
 ## 3. Nhánh Pascal VOC QAT TensorRT
 
 ### 3.1. Dataset Pascal VOC 2007 + 2012
@@ -396,6 +456,7 @@ Cell này đo cả mAP và thời gian inference trên cùng 1000 ảnh để t�
 - Focal loss phù hợp với bài toán mất cân bằng foreground/background.
 - Selective QAT dễ debug và làm baseline ổn định.
 - TensorRT hybrid cho phép chạy INT8 trên GPU NVIDIA mà không cần export toàn bộ detector.
+- Benchmark SeaDronesSee cho thấy TensorRT hybrid đạt speedup khoảng `1.30x` so với FP32 PyTorch GPU.
 - Benchmark Pascal VOC cho thấy speedup khoảng `1.60x - 1.64x`.
 
 ### Hạn chế
@@ -419,4 +480,4 @@ Nếu môi trường không có TensorRT, vẫn có thể train FP32/QAT và exp
 
 ## Kết luận
 
-Repo hiện có hai nhánh rõ ràng. SeaDronesSee là pipeline gốc để xây dựng baseline FP32 và selective QAT. Pascal VOC QAT TensorRT là pipeline benchmark/deploy mới, trong đó ConvNeXt backbone được chạy bằng TensorRT INT8 trên GPU, còn FPN/RPN/RoI/NMS giữ PyTorch CUDA để đảm bảo ổn định. Với Pascal VOC 2007 + 2012 trên 1000 ảnh, TensorRT hybrid đạt khoảng `1.60x - 1.64x` speedup so với FP32 PyTorch GPU trong cấu hình benchmark hiện tại.
+Repo hiện có hai nhánh rõ ràng. SeaDronesSee là pipeline gốc để xây dựng baseline FP32, selective QAT và benchmark TensorRT hybrid trên dữ liệu drone/hàng hải. Pascal VOC QAT TensorRT là pipeline benchmark/deploy mở rộng, trong đó ConvNeXt backbone được chạy bằng TensorRT INT8 trên GPU, còn FPN/RPN/RoI/NMS giữ PyTorch CUDA để đảm bảo ổn định. Với SeaDronesSee trên 1000 ảnh, TensorRT hybrid đạt khoảng `1.30x` speedup; với Pascal VOC 2007 + 2012 trên 1000 ảnh, TensorRT hybrid đạt khoảng `1.60x - 1.64x` speedup so với FP32 PyTorch GPU trong cấu hình benchmark hiện tại.
