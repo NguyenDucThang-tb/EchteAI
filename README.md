@@ -347,3 +347,62 @@ Thí nghiệm PascalVOC cho thấy:
 2. QAT eager là hướng khá khả thi: độ chênh accuracy so với FP32 không lớn, trong khi mô hình đã học thích nghi với fake-quant.
 3. INT8 eager giảm kích thước mô hình rất mạnh, nhưng vẫn trả giá bằng suy giảm `mAP`, đặc biệt là trên `mAP@50:95` tổng thể.
 4. PascalVOC là bằng chứng rằng pipeline hiện tại không chỉ hợp cho SeaDronesSee mà còn hoạt động được trên bộ dữ liệu detection phổ biến, tạo nên một baseline thực nghiệm hợp lý cho các bước nghiên cứu graph/PT2E và TensorRT tiếp theo.
+
+
+## 12. Hướng phát triển tiếp theo
+
+Sau khi đã có baseline FP32, QAT eager và INT8 eager trên PascalVOC, hướng ưu tiên tiếp theo là quay lại SeaDronesSee và tối ưu pipeline riêng cho bài toán phát hiện vật thể nhỏ. Các hướng chính gồm:
+
+### 12.1. Tối ưu anchor cho vật thể nhỏ
+
+Bộ anchor hiện tại đã được suy ra từ thống kê bounding box sau resize, nhưng vẫn còn dư địa để tối ưu sâu hơn cho nhóm đối tượng rất nhỏ. Các hướng cần thử gồm:
+
+- tinh chỉnh lại `anchor sizes` để tập trung mạnh hơn vào vùng kích thước rất nhỏ
+- điều chỉnh `aspect ratios` theo phân bố hình dạng thực tế của đối tượng trên biển
+- so sánh anchor suy ra từ toàn bộ tập dữ liệu với anchor suy ra riêng từ nhóm vật thể nhỏ
+- đo lại ảnh hưởng lên `AP small`, `RPN recall` và số lượng false positive
+
+Mục tiêu của bước này là cải thiện chất lượng proposal ngay từ giai đoạn đầu, thay vì để các head phía sau phải bù cho proposal bị bỏ sót.
+
+### 12.2. Tối ưu chính sách resize
+
+Độ phân giải đầu vào cao có ảnh hưởng trực tiếp đến bài toán small-object detection. Vì vậy, các thực nghiệm tiếp theo nên khảo sát thêm:
+
+- tăng kích thước cố định cho cạnh ngắn
+- thay đổi `max_size` để giữ thêm chi tiết không gian
+- so sánh `fixed-size resize` với cách resize giữ tỉ lệ hiện tại
+- đánh giá trade-off giữa `AP small`, latency và memory
+
+Mục tiêu ở đây là tìm điểm cân bằng tốt hơn giữa chi tiết ảnh đầu vào và chi phí tính toán khi triển khai.
+
+### 12.3. Tối ưu proposal generation
+
+Với vật thể nhỏ, chất lượng proposal ảnh hưởng rất lớn đến chất lượng detector cuối cùng. Những hướng cần tiếp tục khảo sát gồm:
+
+- tinh chỉnh `rpn_pre_nms_top_n` và `rpn_post_nms_top_n`
+- điều chỉnh ngưỡng NMS ở RPN để giữ lại nhiều proposal nhỏ hơn
+- phân tích số proposal thực sự hữu ích trên mỗi ảnh
+- đo lại `proposal_iou_mean`, `proposal_iou_median` và `rpn_recall_100/300/1000`
+
+Nếu giai đoạn proposal được tối ưu tốt hơn, phần RoI Heads phía sau sẽ có cơ hội phục hồi thêm recall cho nhóm đối tượng rất nhỏ.
+
+### 12.4. Mở rộng phạm vi quantization
+
+Hiện tại hướng ổn định nhất vẫn là selective quantization trên backbone. Tuy nhiên, về dài hạn vẫn cần khảo sát:
+
+- mở rộng scope từ `backbone.body` sang `backbone.body + FPN`
+- xây dựng các submodule thân thiện hơn với PT2E / graph quantization
+- đánh giá lại khả năng export và deploy với TensorRT ở phạm vi lớn hơn `backbone-only`
+
+Đây là bước quan trọng nếu mục tiêu tiếp theo là tăng thêm lợi ích tốc độ mà vẫn giữ được chất lượng detector.
+
+### 12.5. Đánh giá chuyên sâu cho small objects
+
+Ngoài mAP tổng thể, các thực nghiệm tiếp theo nên ưu tiên báo cáo thêm các chỉ số nhạy với nhóm đối tượng mục tiêu, ví dụ:
+
+- `AP small`
+- recall theo nhóm kích thước vật thể
+- false positives trên nền biển
+- missed detections trên vật thể rất nhỏ
+
+Các thống kê này sẽ giúp chứng minh rõ hơn liệu thay đổi về anchor, resize và proposal có thực sự cải thiện đúng nhóm đối tượng cần tối ưu hay không.
