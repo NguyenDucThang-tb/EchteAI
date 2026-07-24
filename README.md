@@ -252,3 +252,98 @@ Các kết quả dưới đây được đo trên `100 sample` của tập test.
 | Speedup vs FP32 full | 1.0000× | 1.2029× | 1.2414× |
 
 Kết quả cho thấy hai cấu hình INT8 đều cải thiện tốc độ suy luận so với baseline FP32 full trên cùng 100 sample. Cụ thể, bản INT8 sau QAT epoch 1 đạt khoảng `1.20×` tốc độ của FP32 full, còn bản INT8 sau QAT epoch 2 đạt khoảng `1.24×`. Đổi lại, các chỉ số mAP tổng thể vẫn thấp hơn baseline FP32 full, nhưng mức suy giảm chưa quá lớn so với lợi ích tăng tốc đạt được. Trong hai cấu hình INT8, bản sau epoch 2 cho kết quả cân bằng hơn giữa chất lượng và tốc độ.
+
+
+## 11. PascalVOC benchmark
+
+Phan nay duoc bo sung de kiem tra tinh tong quat cua pipeline ResNet50 Faster R-CNN truoc khi quay lai toi uu cho SeaDronesSee. Toan bo ket qua duoi day duoc bao cao tren `100 sample` test cua PascalVOC.
+
+### 11.1 Dataset
+
+PascalVOC la bo du lieu detection pho bien, gom `20 foreground class` va `1 background class`, co nhieu kich thuoc vat the va boi canh khac nhau hon SeaDronesSee. Bo du lieu nay duoc dung de kiem tra xem pipeline ResNet50 hien tai co hoc duoc detector tong quat, hoi tu on dinh va giu duoc chat luong sau quantization hay khong.
+
+Trong cac thi nghiem nay, model duoc train va danh gia voi:
+
+- backbone: `ResNet50-FPN`
+- detector: `Faster R-CNN`
+- so class: `21` (20 foreground + background)
+- resize policy cua detector: `min_size = 800`, `max_size = 1333`
+
+### 11.2 Convergence of FP32 baseline
+
+Duong cong FP32 cho thay qua trinh toi uu hoi tu ro rang trong 10 epoch dau. Train loss giam deu, trong khi `mAP@50:95` va `mAP@50` tang nhanh o giai doan dau va dat dinh tai epoch 8.
+
+![FP32 PascalVOC convergence](./docs/figures/fp32_pascalvoc_10epoch_curves.png)
+
+Tom tat:
+
+- best FP32 epoch trong 10 epoch dau: `epoch 8`
+- best `mAP@50:95 = 0.4501`
+- best `mAP@50 = 0.7617`
+
+### 11.3 Convergence of QAT eager
+
+QAT eager duoc huan luyen theo hai pha:
+
+- `epoch 1-2`: `weight_only`
+- `epoch 3-5`: `full`
+
+Duong cong duoi day cho thay sau khi chuyen sang pha `full`, `mAP@50:95` tang them va dat dinh tai epoch 4, sau do giam nhe o epoch 5. Dieu nay cho thay backbone da thich nghi duoc voi fake-quant, nhung chat luong van thap hon baseline FP32.
+
+![QAT PascalVOC convergence](./docs/figures/qat_pascalvoc_5epoch_curves.png)
+
+Tom tat:
+
+- best QAT epoch trong 5 epoch ghi nhan: `epoch 4`
+- best `mAP@50:95 = 0.4320`
+- best `mAP@50 = 0.7272`
+
+### 11.4 Accuracy comparison: FP32 vs QAT eager vs INT8 eager
+
+Bang duoi day tong hop ket qua chat luong cua ba cau hinh:
+
+- `FP32 full`: detector day du PyTorch
+- `QAT eager`: detector da train voi QAT eager
+- `INT8 eager`: model INT8 eager sau convert
+
+| Metric | FP32 full | QAT eager | INT8 eager | dQAT-FP32 | dINT8-FP32 |
+|---|---:|---:|---:|---:|---:|
+| mAP@50:95 | 0.4783 | 0.4330 | 0.3693 | -0.0453 | -0.1090 |
+| mAP@50 | 0.7655 | 0.6938 | 0.6170 | -0.0717 | -0.1485 |
+| AP small | 0.3512 | 0.5452 | 0.3872 | 0.1939 | 0.0360 |
+| AP medium | 0.4141 | 0.3641 | 0.3872 | -0.0500 | -0.0269 |
+| AP large | 0.5044 | 0.4776 | 0.3804 | -0.0268 | -0.1240 |
+| Precision | 0.5815 | 0.6429 | 0.6651 | 0.0613 | 0.0835 |
+| Recall | 0.8326 | 0.7137 | 0.6123 | -0.1189 | -0.2203 |
+| Accuracy | 0.5207 | 0.5110 | 0.4680 | -0.0096 | -0.0526 |
+| Mean IoU | 0.7966 | 0.8147 | 0.8155 | 0.0181 | 0.0189 |
+| F1 | 0.6848 | 0.6764 | 0.6376 | -0.0084 | -0.0472 |
+
+Nhan xet chinh:
+
+- `FP32 full` van la baseline chat luong cao nhat theo `mAP@50:95` va `mAP@50`.
+- `QAT eager` giu chat luong kha sat FP32; muc giam `mAP@50:95` chi `0.0453`.
+- `INT8 eager` giam them ve mAP tong the, nhung van giu duoc kha tot o `AP small`, cho thay duong quantization nay van co gia tri trong bai toan vat the nho.
+- `QAT eager` va `INT8 eager` deu co `Mean IoU` cao hon FP32, nhung `Recall` giam ro, nghia la model luong tu hoa co xu huong du doan it box hon nhung localization tren cac box giu lai van kha chat.
+
+### 11.5 Memory efficiency
+
+Thu nghiem kich thuoc mo hinh cho thay loi ich deploy ro rang cua eager INT8:
+
+| Model | Full model size |
+|---|---:|
+| FP32 full | 171.99 MB |
+| INT8 eager | 83.89 MB |
+
+- size reduction: `51.23%`
+
+Ket qua nay cho thay eager INT8 giam hon mot nua kich thuoc mo hinh so voi FP32, doi lai bang muc suy giam nhat dinh ve `mAP`. Vi vay, trong pham vi PascalVOC, `QAT eager` la diem can bang tot hon neu uu tien accuracy, con `INT8 eager` phu hop hon khi uu tien footprint va deployment cost.
+
+### 11.6 Experimental takeaway
+
+Thi nghiem PascalVOC cho thay:
+
+1. Pipeline FP32 ResNet50 Faster R-CNN hoi tu tot va dat baseline on dinh tren bo du lieu tong quat.
+2. QAT eager la huong kha kha thi: do chenh accuracy so voi FP32 khong lon, trong khi mo hinh da hoc thich nghi voi fake-quant.
+3. INT8 eager giam kich thuoc mo hinh rat manh, nhung van tra gia bang suy giam `mAP`, dac biet la tren `mAP@50:95` tong the.
+4. PascalVOC la bang chung rang pipeline hien tai khong chi hop cho SeaDronesSee ma con hoat dong duoc tren bo du lieu detection pho bien, tao nen mot baseline thuc nghiem hop ly cho cac buoc nghien cuu graph/PT2E va TensorRT tiep theo.
