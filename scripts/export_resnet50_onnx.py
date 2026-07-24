@@ -28,9 +28,6 @@ from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module, reso
 from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
 from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 from pipelines.fasterrcnn_qat.quantization import (
-    mixed_precision_policy_from_config,
-    module_qconfig_map_from_policy,
-    policy_scope_to_quantized_modules,
     prepare_selective_qat,
     set_qat_phase,
 )
@@ -46,7 +43,9 @@ def parse_args():
     parser.add_argument("--output")
     parser.add_argument("--artifact-dir")
     parser.add_argument("--opset", type=int, default=17)
-    parser.add_argument("--force-w8a8", action="store_true")
+    parser.add_argument("--height", type=int)
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--batch-size", type=int)
     parser.add_argument("--tensorrt-friendly-int8", action="store_true")
     parser.add_argument("--dynamic-hw", action="store_true", help="Export ONNX with dynamic height/width axes")
     return parser.parse_args()
@@ -96,7 +95,6 @@ def load_source_model(
     model_kind,
     fp32_checkpoint=None,
     qat_checkpoint=None,
-    force_w8a8=False,
     partial_fp32_checkpoint=False,
 ):
     model = build_fasterrcnn_model(config).cpu().eval()
@@ -130,11 +128,6 @@ def load_source_model(
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
     quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
-    mixed_precision_policy = None if force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
-    module_qconfig_map = None
-    if mixed_precision_policy is not None:
-        quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
-        module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
         model = prepare_selective_qat(
@@ -142,7 +135,6 @@ def load_source_model(
             variant,
             backend,
             quantized_modules=quantized_modules,
-            module_qconfig_map=module_qconfig_map,
         )
     payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
     set_qat_phase(model, "frozen")
@@ -154,9 +146,9 @@ def main():
     config = load_config(args.config, require_dataset=False)
     compiler_cfg = config.get("quantization", {}).get("compiler", {})
     scope = resolve_compiler_scope(config)
-    batch_size = int(compiler_cfg.get("example_batch_size", 1))
-    height = int(compiler_cfg.get("example_height", 256))
-    width = int(compiler_cfg.get("example_width", 320))
+    batch_size = int(args.batch_size or compiler_cfg.get("example_batch_size", 1))
+    height = int(args.height or compiler_cfg.get("example_height", config["model"].get("min_size", 256)))
+    width = int(args.width or compiler_cfg.get("example_width", config["model"].get("max_size", 320)))
 
     artifact_dir = Path(
         args.artifact_dir
@@ -170,7 +162,6 @@ def main():
         args.model,
         fp32_checkpoint=args.fp32_checkpoint,
         qat_checkpoint=args.qat_checkpoint,
-        force_w8a8=args.force_w8a8,
         partial_fp32_checkpoint=args.partial_fp32_checkpoint,
     )
     target_module = build_compiler_target_module(model, config).cpu().eval()
@@ -196,21 +187,13 @@ def main():
                 3: f"feat{index}_width",
             }
         export_kwargs["dynamic_axes"] = dynamic_axes
-    if args.model == "qat_graph":
-        torch.onnx.export(
-            target_module,
-            (sample,),
-            str(onnx_path),
-            dynamo=False,
-            **export_kwargs,
-        )
-    else:
-        torch.onnx.export(
-            target_module,
-            (sample,),
-            str(onnx_path),
-            **export_kwargs,
-        )
+    torch.onnx.export(
+        target_module,
+        (sample,),
+        str(onnx_path),
+        dynamo=False,
+        **export_kwargs,
+    )
 
     normalized_zero_points = 0
     if args.model == "qat_graph" and args.tensorrt_friendly_int8:
@@ -229,7 +212,6 @@ def main():
         "output_names": output_names,
         "example_shape": list(sample.shape),
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
-        "force_w8a8": bool(args.force_w8a8),
         "tensorrt_friendly_int8": bool(args.tensorrt_friendly_int8),
         "dynamic_hw": bool(args.dynamic_hw),
         "normalized_zero_points": int(normalized_zero_points),

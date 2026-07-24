@@ -29,13 +29,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint, load_partial_checkpoint
-from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module
+from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module, resolve_compiler_scope
 from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
 from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 from pipelines.fasterrcnn_qat.quantization import (
-    mixed_precision_policy_from_config,
-    module_qconfig_map_from_policy,
-    policy_scope_to_quantized_modules,
     prepare_selective_qat,
     set_qat_phase,
 )
@@ -52,8 +49,10 @@ def parse_args():
     parser.add_argument("--qat-checkpoint")
     parser.add_argument("--partial-fp32-checkpoint", action="store_true")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--opset", type=int, default=18)
-    parser.add_argument("--force-w8a8", action="store_true")
+    parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument("--height", type=int)
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--batch-size", type=int)
     parser.add_argument("--tensorrt-friendly-int8", action="store_true")
     parser.add_argument("--dynamic-hw", action="store_true", help="Export ONNX with dynamic height/width axes")
     return parser.parse_args()
@@ -103,7 +102,6 @@ def load_source_model(
     model_kind,
     fp32_checkpoint=None,
     qat_checkpoint=None,
-    force_w8a8=False,
     partial_fp32_checkpoint=False,
 ):
     model = build_fasterrcnn_model(config).cpu().eval()
@@ -137,11 +135,6 @@ def load_source_model(
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
     quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
-    mixed_precision_policy = None if force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
-    module_qconfig_map = None
-    if mixed_precision_policy is not None:
-        quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
-        module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
         model = prepare_selective_qat(
@@ -149,7 +142,6 @@ def load_source_model(
             variant,
             backend,
             quantized_modules=quantized_modules,
-            module_qconfig_map=module_qconfig_map,
         )
     payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
     set_qat_phase(model, "frozen")
@@ -162,17 +154,17 @@ def main():
     config.setdefault("quantization", {}).setdefault("compiler", {})
     config["quantization"]["compiler"]["scope"] = "backbone_fpn"
     compiler_cfg = config["quantization"]["compiler"]
+    scope = resolve_compiler_scope(config)
 
-    batch_size = int(compiler_cfg.get("example_batch_size", 1))
-    height = int(compiler_cfg.get("example_height", 1080))
-    width = int(compiler_cfg.get("example_width", 1920))
+    batch_size = int(args.batch_size or compiler_cfg.get("example_batch_size", 1))
+    height = int(args.height or compiler_cfg.get("example_height", config["model"].get("min_size", 1080)))
+    width = int(args.width or compiler_cfg.get("example_width", config["model"].get("max_size", 1920)))
 
     model, payload = load_source_model(
         config,
         args.model,
         fp32_checkpoint=args.fp32_checkpoint,
         qat_checkpoint=args.qat_checkpoint,
-        force_w8a8=args.force_w8a8,
         partial_fp32_checkpoint=args.partial_fp32_checkpoint,
     )
 
@@ -206,21 +198,13 @@ def main():
             "p5": {2: "p5_height", 3: "p5_width"},
             "p6_pool": {2: "p6_height", 3: "p6_width"},
         }
-    if args.model == "qat_graph":
-        torch.onnx.export(
-            target_module,
-            (sample,),
-            str(onnx_path),
-            dynamo=False,
-            **export_kwargs,
-        )
-    else:
-        torch.onnx.export(
-            target_module,
-            (sample,),
-            str(onnx_path),
-            **export_kwargs,
-        )
+    torch.onnx.export(
+        target_module,
+        (sample,),
+        str(onnx_path),
+        dynamo=False,
+        **export_kwargs,
+    )
 
     normalized_zero_points = 0
     if args.model == "qat_graph" and args.tensorrt_friendly_int8:
@@ -233,7 +217,7 @@ def main():
     metadata = {
         "model_kind": args.model,
         "backbone": config["model"].get("backbone", "unknown"),
-        "scope": "backbone_fpn",
+        "scope": scope,
         "interface": "model.backbone(...)",
         "onnx_path": str(onnx_path),
         "input_name": "input0",
@@ -241,7 +225,6 @@ def main():
         "example_shape": list(sample.shape),
         "output_shapes": [list(tensor.shape) for tensor in outputs],
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
-        "force_w8a8": bool(args.force_w8a8),
         "tensorrt_friendly_int8": bool(args.tensorrt_friendly_int8),
         "dynamic_hw": bool(args.dynamic_hw),
         "normalized_zero_points": int(normalized_zero_points),
