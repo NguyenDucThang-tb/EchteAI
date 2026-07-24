@@ -228,30 +228,38 @@ Bên cạnh đó, kiến trúc hiện tại vẫn có các hạn chế cần nê
 
 ## 10. Kết quả thực nghiệm
 
-Các kết quả dưới đây được đo trên `100 sample` của tập test. Trong đó, cấu hình `FP32 full` là detector chạy hoàn toàn bằng PyTorch, còn hai cấu hình `INT8 QAT epoch 1` và `INT8 QAT epoch 2` là đường triển khai hybrid với backbone TensorRT INT8. Cột `Speedup` được tính theo tỉ lệ tốc độ so với baseline `FP32 full`, cụ thể:
+Phần này cập nhật lại kết quả SeaDronesSee trên tập test mở rộng hơn so với mốc 100 ảnh trước đó. Trong đó:
+
+- `FP32 full` là detector chạy hoàn toàn bằng PyTorch
+- `INT8 hybrid` là đường triển khai backbone TensorRT INT8, phần còn lại vẫn là PyTorch
+
+Cột `ΔINT8-FP32` được tính theo:
 
 \[
-\text{Speedup} = \frac{\text{FPS của cấu hình hiện tại}}{\text{FPS của FP32 full}}
+\Delta = \text{INT8 hybrid} - \text{FP32 full}
 \]
 
-| Metric | FP32 full | INT8 QAT epoch 1 | INT8 QAT epoch 2 |
+| Metric | FP32 full | INT8 hybrid | ΔINT8-FP32 |
 |---|---:|---:|---:|
-| mAP@50:95 | 0.4328 | 0.3693 | 0.3781 |
-| mAP@50 | 0.7149 | 0.6300 | 0.6443 |
-| AP small | 0.1019 | 0.0943 | 0.0854 |
-| AP medium | 0.1745 | 0.1530 | 0.1619 |
-| AP large | 0.3613 | 0.3144 | 0.3172 |
-| Precision | 0.6519 | 0.8182 | 0.6431 |
-| Recall | 0.7130 | 0.5710 | 0.6314 |
-| Accuracy | 0.5164 | 0.5067 | 0.4676 |
-| Mean IoU | 0.8014 | 0.8051 | 0.7961 |
-| F1 | 0.6811 | 0.6726 | 0.6372 |
-| Avg inference (ms/img) | 220.4003 | 183.2253 | 177.5467 |
-| FPS | 4.5372 | 5.4578 | 5.6323 |
-| Memory (MB) | 158 | 93 | 92 |
-| Speedup vs FP32 full | 1.0000× | 1.2029× | 1.2414× |
+| mAP@50:95 | 0.4085 | 0.3632 | -0.0453 |
+| mAP@50 | 0.8019 | 0.7627 | -0.0392 |
+| AP small | 0.0657 | 0.0643 | -0.0014 |
+| AP medium | 0.2022 | 0.1855 | -0.0167 |
+| AP large | 0.3691 | 0.1929 | -0.1762 |
+| Precision | 0.7898 | 0.8142 | 0.0244 |
+| Recall | 0.8163 | 0.7602 | -0.0561 |
+| Accuracy | 0.6706 | 0.6478 | -0.0227 |
+| Mean IoU | 0.7612 | 0.7581 | -0.0031 |
+| F1 | 0.8028 | 0.7863 | -0.0165 |
+| Avg inference (ms/img) | 261.4185 | 180.1880 | -81.2305 |
+| FPS | 3.8253 | 5.5498 | 1.7245 |
+| Speedup vs FP32 full | 1.0000× | 1.4508× | - |
 
-Kết quả cho thấy hai cấu hình INT8 đều cải thiện tốc độ suy luận so với baseline FP32 full trên cùng 100 sample. Cụ thể, bản INT8 sau QAT epoch 1 đạt khoảng `1.20×` tốc độ của FP32 full, còn bản INT8 sau QAT epoch 2 đạt khoảng `1.24×`. Đổi lại, các chỉ số mAP tổng thể vẫn thấp hơn baseline FP32 full, nhưng mức suy giảm chưa quá lớn so với lợi ích tăng tốc đạt được. Trong hai cấu hình INT8, bản sau epoch 2 cho kết quả cân bằng hơn giữa chất lượng và tốc độ.
+Kết quả này cho thấy trên SeaDronesSee, đường `INT8 hybrid` vẫn giữ được chất lượng khá sát baseline `FP32 full` ở các chỉ số tổng quát như `mAP@50:95`, `mAP@50`, `Mean IoU` và `F1`, trong khi tốc độ suy luận tăng khoảng `1.45×`.
+
+Điểm cần lưu ý là mức suy giảm ở `AP small` gần như không đáng kể, nhưng `AP large` giảm khá mạnh. Điều này cho thấy pipeline quantization hiện tại phù hợp hơn với mục tiêu giữ chất lượng trên nhóm vật thể nhỏ và trung bình, trong khi vẫn còn dư địa để cải thiện trên các đối tượng lớn hơn hoặc các tình huống mà proposal bị lệch phân bố sau quantization.
+
+Ngoài ra, `INT8 hybrid` còn có `Precision` nhỉnh hơn FP32, nhưng `Recall` thấp hơn. Điều đó phù hợp với quan sát trước đó: sau khi lượng tử hóa, detector có xu hướng dự đoán thận trọng hơn, giữ lại ít box hơn nhưng các box được giữ lại vẫn có độ chặt tương đối tốt.
 
 
 ## 11. PascalVOC benchmark
