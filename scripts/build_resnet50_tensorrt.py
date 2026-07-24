@@ -63,6 +63,23 @@ def load_tensorrt():
     return trt
 
 
+def get_tensorrt_version(trt):
+    version = getattr(trt, "__version__", None)
+    if version is not None:
+        return str(version)
+    try:
+        from importlib.metadata import version as pkg_version
+
+        for package_name in ("tensorrt", "tensorrt-cu13-bindings", "tensorrt-cu13-libs"):
+            try:
+                return str(pkg_version(package_name))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return "unknown"
+
+
 def _logger(trt):
     return trt.Logger(trt.Logger.WARNING)
 
@@ -334,7 +351,7 @@ def main():
         "profile_min_shape": list(min_shape),
         "profile_opt_shape": list(opt_shape),
         "profile_max_shape": list(max_shape),
-        "tensorrt_version": trt.__version__,
+        "tensorrt_version": get_tensorrt_version(trt),
     }
     summary_path = engine_path.with_suffix(engine_path.suffix + ".json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
