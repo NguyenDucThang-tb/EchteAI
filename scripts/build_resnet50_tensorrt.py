@@ -55,8 +55,11 @@ def parse_args():
 def load_tensorrt():
     try:
         import tensorrt as trt
-    except ImportError as error:
-        raise RuntimeError("TensorRT Python package is required for this step.") from error
+    except ImportError:
+        try:
+            from tensorrt_bindings import tensorrt as trt
+        except ImportError as error:
+            raise RuntimeError("TensorRT Python package is required for this step.") from error
     return trt
 
 
