@@ -13,11 +13,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from torchvision.models.detection.image_list import ImageList
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint
+from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint, load_partial_checkpoint
 from pipelines.fasterrcnn_qat.config import choose_device, load_config, quantized_modules_for_variant
 from pipelines.fasterrcnn_qat.data import build_coco_loader, unwrap_coco_dataset
 from pipelines.fasterrcnn_qat.metrics import _coco_metrics, native_detection_metrics, save_metrics
@@ -41,6 +43,8 @@ def parse_args():
     parser.add_argument("--split", choices=["val", "test"], default="test")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output")
+    parser.add_argument("--height", type=int)
+    parser.add_argument("--width", type=int)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--progress-frequency", type=int, default=10)
     return parser.parse_args()
@@ -190,20 +194,84 @@ def preprocess_batch(model, images, device):
     return image_list, original_sizes
 
 
+def preprocess_batch_fixed(model, images, targets, fixed_height, fixed_width, device):
+    image_mean = torch.tensor(model.transform.image_mean, device=device).view(-1, 1, 1)
+    image_std = torch.tensor(model.transform.image_std, device=device).view(-1, 1, 1)
+    batched = []
+    resized_targets = []
+    original_sizes = []
+    fixed_sizes = []
+
+    for image, target in zip(images, targets):
+        image = image.to(device)
+        original_h, original_w = image.shape[-2:]
+        original_sizes.append((original_h, original_w))
+        normalized = (image - image_mean) / image_std
+        resized = F.interpolate(
+            normalized.unsqueeze(0),
+            size=(fixed_height, fixed_width),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+        batched.append(resized)
+        fixed_sizes.append((fixed_height, fixed_width))
+
+        scale_x = fixed_width / float(original_w)
+        scale_y = fixed_height / float(original_h)
+        scaled_target = {
+            key: value.to(device) if torch.is_tensor(value) else value
+            for key, value in target.items()
+        }
+        boxes = scaled_target["boxes"].clone()
+        boxes[:, [0, 2]] *= scale_x
+        boxes[:, [1, 3]] *= scale_y
+        scaled_target["boxes"] = boxes
+        if "area" in scaled_target:
+            scaled_target["area"] = scaled_target["area"] * (scale_x * scale_y)
+        resized_targets.append(scaled_target)
+
+    image_list = ImageList(torch.stack(batched, dim=0), fixed_sizes)
+    return image_list, resized_targets, original_sizes
+
+
 @torch.inference_mode()
-def evaluate_hybrid_model(model, backbone_runner, loader, device, progress_frequency=10):
+def evaluate_hybrid_model(
+    model,
+    backbone_runner,
+    loader,
+    device,
+    progress_frequency=10,
+    fixed_height=None,
+    fixed_width=None,
+):
     model.eval()
     predictions, targets = [], []
     total_images = len(loader.dataset)
     processed = 0
     timings = []
-    print(
-        f"hybrid evaluation started: target={total_images} images device={device} transform=model.transform(...)",
-        flush=True,
-    )
+    if fixed_height is not None and fixed_width is not None:
+        print(
+            f"hybrid evaluation started: target={total_images} images device={device} fixed_shape={fixed_height}x{fixed_width}",
+            flush=True,
+        )
+    else:
+        print(
+            f"hybrid evaluation started: target={total_images} images device={device} transform=model.transform(...)",
+            flush=True,
+        )
 
     for images, batch_targets in loader:
-        image_list, original_sizes = preprocess_batch(model, images, device)
+        if fixed_height is not None and fixed_width is not None:
+            image_list, _, original_sizes = preprocess_batch_fixed(
+                model,
+                images,
+                batch_targets,
+                fixed_height,
+                fixed_width,
+                device,
+            )
+        else:
+            image_list, original_sizes = preprocess_batch(model, images, device)
 
         t0 = time.perf_counter()
         c_features = backbone_runner(image_list.tensors)
@@ -241,6 +309,8 @@ def evaluate_hybrid_model(model, backbone_runner, loader, device, progress_frequ
     metrics["avg_inference_ms_per_image"] = sum(timings) / max(len(timings), 1)
     metrics["fps"] = 1000.0 / metrics["avg_inference_ms_per_image"] if metrics["avg_inference_ms_per_image"] > 0 else float("nan")
     metrics["engine_input_shapes_seen"] = [list(shape) for shape in sorted(backbone_runner.shapes_seen)]
+    if fixed_height is not None and fixed_width is not None:
+        metrics["engine_shape"] = [int(fixed_height), int(fixed_width)]
     print("hybrid evaluation completed", flush=True)
     return metrics
 
@@ -250,6 +320,14 @@ def main():
     if int(args.batch_size) != 1:
         raise ValueError("Hybrid TensorRT benchmark currently supports batch_size=1 only")
     config = load_config(args.config, require_dataset=True)
+    compiler_cfg = config.get("quantization", {}).get("compiler", {})
+    fixed_height = args.height
+    fixed_width = args.width
+    if fixed_height is None and fixed_width is None and compiler_cfg.get("example_height") and compiler_cfg.get("example_width"):
+        fixed_height = int(compiler_cfg.get("example_height"))
+        fixed_width = int(compiler_cfg.get("example_width"))
+    elif (fixed_height is None) != (fixed_width is None):
+        raise ValueError("--height and --width must be provided together")
     device = choose_device(config.get("device", "auto"))
     if device.type != "cuda":
         raise RuntimeError("Hybrid TensorRT benchmark requires CUDA")
@@ -265,6 +343,8 @@ def main():
         loader,
         device,
         progress_frequency=int(args.progress_frequency),
+        fixed_height=fixed_height,
+        fixed_width=fixed_width,
     )
 
     output = args.output or str(Path(config["output"]["directory"]) / "tensorrt_hybrid_eval.json")
