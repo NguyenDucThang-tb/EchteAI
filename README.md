@@ -284,7 +284,7 @@ Trong các thí nghiệm này, model được train và đánh giá với:
 ![FP32 PascalVOC convergence](./docs/figures/fp32_pascalvoc_10epoch_curves.png)
 
 Tóm tắt:
-
+- training time : 11 tiếng
 - best FP32 epoch trong 10 epoch đầu: `epoch 8`
 - best `mAP@50:95 = 0.4501`
 - best `mAP@50 = 0.7617`
@@ -301,7 +301,7 @@ QAT eager được huấn luyện theo hai pha:
 ![QAT PascalVOC convergence](./docs/figures/qat_pascalvoc_5epoch_curves.png)
 
 Tóm tắt:
-
+- training time: 7 tiếng
 - best QAT epoch trong 5 epoch ghi nhận: `epoch 4`
 - best `mAP@50:95 = 0.4320`
 - best `mAP@50 = 0.7272`
