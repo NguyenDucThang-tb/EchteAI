@@ -228,7 +228,7 @@ Bên cạnh đó, kiến trúc hiện tại vẫn có các hạn chế cần nê
 
 ## 10. Kết quả thực nghiệm
 
-Phần này cập nhật lại kết quả SeaDronesSee trên tập test mở rộng hơn so với mốc 100 ảnh trước đó. Trong đó:
+Phần này cập nhật lại kết quả SeaDronesSee trên tập test 1000 ảnh. Trong đó:
 
 - `FP32 full` là detector chạy hoàn toàn bằng PyTorch
 - `INT8 hybrid` là đường triển khai backbone TensorRT INT8, phần còn lại vẫn là PyTorch
