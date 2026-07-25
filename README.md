@@ -407,13 +407,3 @@ Hiện tại hướng ổn định nhất vẫn là selective quantization trên
 
 Đây là bước quan trọng nếu mục tiêu tiếp theo là tăng thêm lợi ích tốc độ mà vẫn giữ được chất lượng detector.
 
-### 12.5. Đánh giá chuyên sâu cho small objects
-
-Ngoài mAP tổng thể, các thực nghiệm tiếp theo nên ưu tiên báo cáo thêm các chỉ số nhạy với nhóm đối tượng mục tiêu, ví dụ:
-
-- `AP small`
-- recall theo nhóm kích thước vật thể
-- false positives trên nền biển
-- missed detections trên vật thể rất nhỏ
-
-Các thống kê này sẽ giúp chứng minh rõ hơn liệu thay đổi về anchor, resize và proposal có thực sự cải thiện đúng nhóm đối tượng cần tối ưu hay không.
