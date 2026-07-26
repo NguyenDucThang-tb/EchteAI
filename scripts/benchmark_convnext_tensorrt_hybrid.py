@@ -15,16 +15,21 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torchvision.models.detection.image_list import ImageList
+from torchvision.models.detection.rpn import concat_box_prediction_layers
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.convnext_qat.checkpoint import load_checkpoint
+from pipelines.convnext_qat.compiler import resolve_compiler_scope
 from pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant
 from pipelines.convnext_qat.data import build_coco_loader, unwrap_coco_dataset
 from pipelines.convnext_qat.metrics import _coco_metrics, native_detection_metrics, save_metrics
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
 from pipelines.convnext_qat.quantization import prepare_selective_qat, set_qat_phase
+
+
+M3_SCOPE = "backbone_fpn_rpn_m3"
 
 
 def parse_args():
@@ -180,9 +185,59 @@ def preprocess_batch(model, images, targets, fixed_height, fixed_width, device):
     return image_list, original_sizes, cpu_targets
 
 
+def _features_from_fpn_tuple(tensors):
+    """Chuyen tuple feature P2-P6 thanh OrderedDict dung format torchvision."""
+    return OrderedDict((str(index), tensor) for index, tensor in enumerate(tensors))
+
+
+def _split_m3_outputs(trt_outputs):
+    """Tach output cua engine M3: FPN features, RPN shared features, objectness."""
+    if len(trt_outputs) % 3 != 0:
+        raise RuntimeError(
+            "M3 TensorRT engine must return FPN features + RPN shared features "
+            f"+ RPN objectness logits; got {len(trt_outputs)} tensors"
+        )
+    levels = len(trt_outputs) // 3
+    if levels <= 0:
+        raise RuntimeError("M3 TensorRT engine returned no feature levels")
+    fpn_features = trt_outputs[:levels]
+    shared_features = trt_outputs[levels: 2 * levels]
+    objectness = trt_outputs[2 * levels:]
+    return fpn_features, shared_features, objectness
+
+
+def _rpn_proposals_from_precomputed_head(model, image_list, features, objectness, pred_bbox_deltas):
+    """Chay proposal decode/NMS cua RPN tu logits/deltas da co.
+
+    Scope M3 da dua backbone+FPN+RPN shared conv+RPN classification vao
+    TensorRT. RPN bbox regression khong thuoc M3, nen bbox deltas van duoc
+    tinh bang PyTorch tu shared features roi dua vao decode/filter goc.
+    """
+    feature_list = list(features.values())
+    anchors = model.rpn.anchor_generator(image_list, feature_list)
+    num_images = len(anchors)
+    num_anchors_per_level = [
+        int(tensor.shape[1] * tensor.shape[2] * tensor.shape[3])
+        for tensor in objectness
+    ]
+    objectness, pred_bbox_deltas = concat_box_prediction_layers(
+        list(objectness),
+        list(pred_bbox_deltas),
+    )
+    proposals = model.rpn.box_coder.decode(pred_bbox_deltas.detach(), anchors)
+    proposals = proposals.view(num_images, -1, 4)
+    boxes, _ = model.rpn.filter_proposals(
+        proposals,
+        objectness,
+        image_list.image_sizes,
+        num_anchors_per_level,
+    )
+    return boxes
+
+
 @torch.inference_mode()
 def evaluate_hybrid_model(model, runner, loader, device, fixed_height, fixed_width, scope, progress_frequency=10):
-    """Chay TensorRT backbone/backbone_fpn roi tiep tuc RPN/ROI bang PyTorch."""
+    """Chay TensorRT theo scope da chon roi tiep tuc phan con lai bang PyTorch."""
     predictions, targets, timings = [], [], []
     total_images = len(loader.dataset)
     processed = 0
@@ -198,11 +253,26 @@ def evaluate_hybrid_model(model, runner, loader, device, fixed_height, fixed_wid
         started = time.perf_counter()
         trt_outputs = runner(image_list.tensors)
         if scope == "backbone":
-            feature_dict = OrderedDict((str(index), tensor) for index, tensor in enumerate(trt_outputs))
+            feature_dict = _features_from_fpn_tuple(trt_outputs)
             features = model.backbone.fpn(feature_dict)
+            proposals, _ = model.rpn(image_list, features, None)
+        elif scope == M3_SCOPE:
+            fpn_features, shared_features, objectness = _split_m3_outputs(trt_outputs)
+            features = _features_from_fpn_tuple(fpn_features)
+            pred_bbox_deltas = [
+                model.rpn.head.bbox_pred(feature)
+                for feature in shared_features
+            ]
+            proposals = _rpn_proposals_from_precomputed_head(
+                model,
+                image_list,
+                features,
+                objectness,
+                pred_bbox_deltas,
+            )
         else:
-            features = OrderedDict((str(index), tensor) for index, tensor in enumerate(trt_outputs))
-        proposals, _ = model.rpn(image_list, features, None)
+            features = _features_from_fpn_tuple(trt_outputs)
+            proposals, _ = model.rpn(image_list, features, None)
         outputs, _ = model.roi_heads(features, proposals, image_list.image_sizes, None)
         outputs = model.transform.postprocess(outputs, image_list.image_sizes, original_sizes)
         torch.cuda.synchronize(device)
@@ -238,7 +308,7 @@ def main():
         raise ValueError("images must be positive")
     config = load_config(args.config, require_dataset=True)
     compiler_cfg = config.get("quantization", {}).get("compiler", {})
-    scope = str(compiler_cfg.get("scope", "backbone")).lower()
+    scope = resolve_compiler_scope(config)
     fixed_height = int(args.height or compiler_cfg.get("example_height", config["model"].get("min_size", 960)))
     fixed_width = int(args.width or compiler_cfg.get("example_width", config["model"].get("max_size", 1600)))
     device = choose_device(config.get("device", "auto"))
@@ -288,4 +358,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
