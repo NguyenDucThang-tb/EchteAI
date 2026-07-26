@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
-from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant  # noqa: E402
+from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant, qat_profile_from_config  # noqa: E402
 from pipelines.convnext_qat.data import (  # noqa: E402
     CocoDetectionDataset,
     build_coco_loader,
@@ -272,8 +272,10 @@ def main():
             f"QAT DDP setup world_size={world_size} variant={variant} "
             f"batch_per_gpu={qat_batch_size} global_batch={qat_batch_size * world_size}",
         )
+        qat_profile = qat_profile_from_config(config)
         rank0_print(rank, f"rank0_train_batches={len(train_loader)}")
         rank0_print(rank, f"quantized_modules={quantized_modules}")
+        rank0_print(rank, f"qat_profile={qat_profile}")
         if mixed_precision_policy is not None:
             rank0_print(rank, f"mixed_precision_policy={policy_summary(mixed_precision_policy)}")
             if skip_final_convert:
@@ -295,6 +297,7 @@ def main():
             backend,
             quantized_modules=quantized_modules,
             module_qconfig_map=module_qconfig_map,
+            qconfig_profile=qat_profile,
         ).to(device)
         backend = qat_model.quantized_backend
         optimizer = make_optimizer(qat_model, config, qat=True)
@@ -395,6 +398,7 @@ def main():
                         "best_map": best_map,
                         "ddp_world_size": world_size,
                         "mixed_precision_policy": mixed_precision_policy,
+                        "qat_profile": qat_profile,
                     },
                 )
                 print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
@@ -445,6 +449,7 @@ def main():
                             "best_map": best_map,
                             "ddp_world_size": world_size,
                             "mixed_precision_policy": mixed_precision_policy,
+                            "qat_profile": qat_profile,
                         },
                     )
                     print(f"saved new QAT best: {config['output']['qat_best']}", flush=True)
@@ -462,6 +467,7 @@ def main():
                         "best_map": best_map,
                         "ddp_world_size": world_size,
                         "mixed_precision_policy": mixed_precision_policy,
+                        "qat_profile": qat_profile,
                     },
                 )
                 print(f"saved QAT resume checkpoint: {config['output']['qat_last']}", flush=True)
@@ -497,6 +503,7 @@ def main():
                         "quantized_modules": quantized_modules or [],
                         "ddp_world_size": world_size,
                         "mixed_precision_policy": mixed_precision_policy,
+                        "qat_profile": qat_profile,
                     },
                 )
                 print(f"Converted selective INT8 checkpoint: {config['output']['int8_model']}", flush=True)

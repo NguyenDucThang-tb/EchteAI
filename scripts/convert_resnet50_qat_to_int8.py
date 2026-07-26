@@ -14,7 +14,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import torch
 
 from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint, save_checkpoint
-from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant, resolve_qat_profile
 from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 from pipelines.fasterrcnn_qat.quantization import (
     convert_selective_qat,
@@ -47,6 +47,7 @@ def main():
 
     variant = str(args.variant or metadata.get("variant") or config["quantization"].get("variant", "M3")).upper()
     backend = str(args.backend or metadata.get("backend") or config["quantization"].get("backend", "x86"))
+    qat_profile = resolve_qat_profile(config, metadata)
     quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
     mixed_precision_policy = None if args.force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
     module_qconfig_map = None
@@ -68,6 +69,7 @@ def main():
             backend,
             quantized_modules=quantized_modules,
             module_qconfig_map=module_qconfig_map,
+            qconfig_profile=qat_profile,
         ).cpu().eval()
     load_checkpoint(args.qat_checkpoint, prepared_model, map_location="cpu", strict=True)
     int8_model = convert_selective_qat(prepared_model, inplace=False).cpu().eval()
@@ -84,6 +86,7 @@ def main():
             "format": "selective_int8",
             "quantized_modules": quantized_modules or [],
             "mixed_precision_policy": None if args.force_w8a8 else mixed_precision_policy,
+            "qat_profile": qat_profile,
             "force_w8a8": bool(args.force_w8a8),
             "source_qat_checkpoint": str(args.qat_checkpoint),
         },

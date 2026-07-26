@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint, load_partial_checkpoint
 from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module, resolve_compiler_scope
-from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant, resolve_qat_profile
 from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 from pipelines.fasterrcnn_qat.quantization import (
     prepare_selective_qat,
@@ -134,6 +134,7 @@ def load_source_model(
     metadata = raw_payload.get("extra", {}) if isinstance(raw_payload, dict) else {}
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
+    qat_profile = resolve_qat_profile(config, metadata)
     quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
@@ -142,6 +143,7 @@ def load_source_model(
             variant,
             backend,
             quantized_modules=quantized_modules,
+            qconfig_profile=qat_profile,
         )
     payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
     set_qat_phase(model, "frozen")
@@ -225,6 +227,7 @@ def main():
         "example_shape": list(sample.shape),
         "output_shapes": [list(tensor.shape) for tensor in outputs],
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
+        "qat_profile": payload.get("extra", {}).get("qat_profile", resolve_qat_profile(config)) if isinstance(payload, dict) else resolve_qat_profile(config),
         "tensorrt_friendly_int8": bool(args.tensorrt_friendly_int8),
         "dynamic_hw": bool(args.dynamic_hw),
         "normalized_zero_points": int(normalized_zero_points),

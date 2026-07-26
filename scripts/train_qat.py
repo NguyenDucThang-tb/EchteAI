@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint
-from pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant
+from pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant, qat_profile_from_config
 from pipelines.convnext_qat.data import build_coco_loader
 from pipelines.convnext_qat.engine import (
     append_epoch_benchmark, benchmark_inference, make_optimizer, set_optimizer_lr,
@@ -74,6 +74,7 @@ def main():
         config, "val", shuffle=False, limit=args.limit, batch_size=qat_batch_size,
     )
     quantized_modules = quantized_modules_for_variant(config, variant)
+    qat_profile = qat_profile_from_config(config)
     mixed_precision_policy = mixed_precision_policy_from_config(config)
     module_qconfig_map = None
     skip_final_convert = False
@@ -87,6 +88,7 @@ def main():
         flush=True,
     )
     print(f"quantized_modules={quantized_modules}", flush=True)
+    print(f"qat_profile={qat_profile}", flush=True)
     if mixed_precision_policy is not None:
         print(f"mixed_precision_policy={policy_summary(mixed_precision_policy)}", flush=True)
         if skip_final_convert:
@@ -108,6 +110,7 @@ def main():
         backend,
         quantized_modules=quantized_modules,
         module_qconfig_map=module_qconfig_map,
+        qconfig_profile=qat_profile,
     ).to(device)
     backend = qat_model.quantized_backend
     print("selective QAT model prepared and moved to device", flush=True)
@@ -172,6 +175,7 @@ def main():
                 "quantized_modules": quantized_modules or [],
                 "best_map": best_map,
                 "mixed_precision_policy": mixed_precision_policy,
+                "qat_profile": qat_profile,
             },
         )
         print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
@@ -212,6 +216,7 @@ def main():
                     "quantized_modules": quantized_modules or [],
                     "best_map": best_map,
                     "mixed_precision_policy": mixed_precision_policy,
+                    "qat_profile": qat_profile,
                 },
             )
             print(f"saved new QAT best: {config['output']['qat_best']}", flush=True)
@@ -225,6 +230,7 @@ def main():
                 "quantized_modules": quantized_modules or [],
                 "best_map": best_map,
                 "mixed_precision_policy": mixed_precision_policy,
+                "qat_profile": qat_profile,
             },
         )
         print(f"saved QAT resume checkpoint: {config['output']['qat_last']}", flush=True)
@@ -255,6 +261,7 @@ def main():
             "format": "selective_int8",
             "quantized_modules": quantized_modules or [],
             "mixed_precision_policy": mixed_precision_policy,
+            "qat_profile": qat_profile,
         },
     )
     print(f"Converted selective INT8 checkpoint: {config['output']['int8_model']}")

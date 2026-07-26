@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.convnext_qat.checkpoint import load_checkpoint, model_state_size_mb
-from pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant, validate_dataset_paths
+from pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant, resolve_qat_profile, validate_dataset_paths
 from pipelines.convnext_qat.data import build_coco_loader
 from pipelines.convnext_qat.metrics import evaluate_model, save_metrics
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
@@ -25,6 +25,7 @@ def load_model(config, kind, checkpoint, device):
     metadata = payload.get("extra", {}) if isinstance(payload, dict) else {}
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
+    qat_profile = resolve_qat_profile(config, metadata)
     quantized_modules = metadata.get(
         "quantized_modules", quantized_modules_for_variant(config, variant)
     )
@@ -34,7 +35,7 @@ def load_model(config, kind, checkpoint, device):
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
         model = convert_selective_qat(
             prepare_selective_qat(
-                model, variant, backend, quantized_modules=quantized_modules
+                model, variant, backend, quantized_modules=quantized_modules, qconfig_profile=qat_profile
             )
         )
     load_checkpoint(checkpoint, model)

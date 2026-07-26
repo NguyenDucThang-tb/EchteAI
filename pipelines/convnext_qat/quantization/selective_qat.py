@@ -44,20 +44,32 @@ class QuantizedOperation(nn.Module):
         return self.dequant(self.operation(self.quant(x)))
 
 
-def selective_qconfig(weight_bits=8, activation_bits=8):
+def selective_qconfig(weight_bits=8, activation_bits=8, profile="eager"):
     if not 2 <= int(weight_bits) <= 8:
         raise ValueError("weight_bits must be between 2 and 8")
     if not 2 <= int(activation_bits) <= 8:
         raise ValueError("activation_bits must be between 2 and 8")
-    activation_quant_max = (1 << int(activation_bits)) - 1
+    profile = str(profile).strip().lower()
+    if profile not in {"eager", "tensorrt"}:
+        raise ValueError("profile must be 'eager' or 'tensorrt'")
     weight_quant_min = -(1 << (int(weight_bits) - 1))
     weight_quant_max = (1 << (int(weight_bits) - 1)) - 1
+    if profile == "tensorrt":
+        activation_dtype = torch.qint8
+        activation_qscheme = torch.per_tensor_symmetric
+        activation_quant_min = -(1 << (int(activation_bits) - 1))
+        activation_quant_max = (1 << (int(activation_bits) - 1)) - 1
+    else:
+        activation_dtype = torch.quint8
+        activation_qscheme = torch.per_tensor_affine
+        activation_quant_min = 0
+        activation_quant_max = (1 << int(activation_bits)) - 1
     return QConfig(
         activation=FakeQuantize.with_args(
             observer=MovingAverageMinMaxObserver,
-            dtype=torch.quint8,
-            qscheme=torch.per_tensor_affine,
-            quant_min=0,
+            dtype=activation_dtype,
+            qscheme=activation_qscheme,
+            quant_min=activation_quant_min,
             quant_max=activation_quant_max,
         ),
         weight=FakeQuantize.with_args(
@@ -118,6 +130,7 @@ def _regions_from_module_names(module_names):
 def prepare_selective_qat(
     model, variant="M3", backend="auto", inplace=False, quantized_modules=None,
     module_qconfig_map=None,
+    qconfig_profile="eager",
 ):
     """Insert fake quant only into regions selected by M0-M4."""
     variant = _validate_variant(variant)
@@ -148,7 +161,7 @@ def prepare_selective_qat(
         qat_model.qat_variant = variant
         qat_model.quantized_backend = backend
         return qat_model
-    qconfig = selective_qconfig()
+    qconfig = selective_qconfig(profile=qconfig_profile)
 
     if "backbone" in regions:
         _wrap_operations(
@@ -183,6 +196,7 @@ def prepare_selective_qat(
     qat_model.quantized_backend = backend
     qat_model.quantized_module_names = list(quantized_modules or [])
     qat_model.mixed_precision_module_qconfigs = sorted((module_qconfig_map or {}).keys())
+    qat_model.qat_qconfig_profile = str(qconfig_profile).strip().lower()
     return qat_model
 
 

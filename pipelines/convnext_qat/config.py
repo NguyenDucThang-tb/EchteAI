@@ -71,3 +71,22 @@ def quantized_modules_for_variant(config, variant):
     if variant in variants:
         return list(variants[variant])
     return None
+
+
+def qat_profile_from_config(config):
+    quantization = config.get("quantization", {})
+    profile = str(quantization.get("qat_profile", "eager")).strip().lower()
+    if profile not in {"eager", "tensorrt"}:
+        raise ValueError("quantization.qat_profile must be 'eager' or 'tensorrt'")
+    return profile
+
+
+def resolve_qat_profile(config, checkpoint_extra=None):
+    if isinstance(checkpoint_extra, dict):
+        profile = checkpoint_extra.get("qat_profile")
+        if profile is not None:
+            profile = str(profile).strip().lower()
+            if profile not in {"eager", "tensorrt"}:
+                raise ValueError("checkpoint extra qat_profile must be 'eager' or 'tensorrt'")
+            return profile
+    return qat_profile_from_config(config)

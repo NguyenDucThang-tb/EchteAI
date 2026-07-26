@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint
-from pipelines.fasterrcnn_qat.config import choose_device, load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.config import choose_device, load_config, quantized_modules_for_variant, resolve_qat_profile
 from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 from pipelines.fasterrcnn_qat.quantization import (
     mixed_precision_policy_from_config,
@@ -162,6 +162,7 @@ def load_hybrid_qat_model(config, checkpoint, device):
     metadata = payload.get("extra", {}) if isinstance(payload, dict) else {}
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
+    qat_profile = resolve_qat_profile(config, metadata)
     quantized_modules = metadata.get(
         "quantized_modules", quantized_modules_for_variant(config, variant)
     )
@@ -178,6 +179,7 @@ def load_hybrid_qat_model(config, checkpoint, device):
             backend,
             quantized_modules=quantized_modules,
             module_qconfig_map=module_qconfig_map,
+            qconfig_profile=qat_profile,
         )
     load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
     return model.to(device).eval()
