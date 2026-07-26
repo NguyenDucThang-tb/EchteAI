@@ -67,6 +67,16 @@ def parse_args():
     parser.add_argument("--epochs-this-run", type=int, help="stop after this many epochs")
     parser.add_argument("--max-steps", type=int, help="cap training steps per epoch for a fast smoke test")
     parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="skip validation metrics after each epoch and only save the resume checkpoint",
+    )
+    parser.add_argument(
+        "--skip-benchmark",
+        action="store_true",
+        help="skip epoch benchmark timing after each epoch",
+    )
+    parser.add_argument(
         "--no-find-unused-parameters",
         action="store_true",
         help="disable DDP unused-parameter detection after you know the graph is stable",
@@ -256,9 +266,10 @@ def main():
         )
         val_loader = None
         if rank == 0:
-            val_loader = build_coco_loader(
-                config, "val", shuffle=False, limit=args.limit, batch_size=qat_batch_size,
-            )
+            if not args.skip_validation or not args.skip_benchmark:
+                val_loader = build_coco_loader(
+                    config, "val", shuffle=False, limit=args.limit, batch_size=qat_batch_size,
+                )
         quantized_modules = quantized_modules_for_variant(config, variant)
         mixed_precision_policy = mixed_precision_policy_from_config(config)
         module_qconfig_map = None
@@ -402,45 +413,54 @@ def main():
                     },
                 )
                 print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
-                print("QAT validation started on rank0", flush=True)
-                val_metrics = evaluate_model(
-                    qat_model, val_loader, device,
-                    include_rpn=True,
-                )
-                print("QAT validation completed", flush=True)
-                benchmark_metrics = benchmark_inference(
-                    qat_model,
-                    val_loader,
-                    device,
-                    int(config["training"].get("epoch_benchmark_images", 100)),
-                )
-                benchmark_record = {
-                    "stage": "qat",
-                    "epoch": epoch + 1,
-                    "phase": phase,
-                    "ddp_world_size": world_size,
-                    **benchmark_metrics,
-                }
-                benchmark_history = config["output"].get(
-                    "epoch_benchmarks",
-                    str(Path(config["output"]["directory"]) / "epoch_benchmarks.json"),
-                )
-                append_epoch_benchmark(benchmark_history, benchmark_record)
-                print(f"QAT epoch benchmark={benchmark_record}", flush=True)
-                print(
+                val_metrics = None
+                benchmark_metrics = None
+                if not args.skip_validation:
+                    print("QAT validation started on rank0", flush=True)
+                    val_metrics = evaluate_model(
+                        qat_model, val_loader, device,
+                        include_rpn=True,
+                    )
+                    print("QAT validation completed", flush=True)
+                if not args.skip_benchmark:
+                    benchmark_metrics = benchmark_inference(
+                        qat_model,
+                        val_loader,
+                        device,
+                        int(config["training"].get("epoch_benchmark_images", 100)),
+                    )
+                    benchmark_record = {
+                        "stage": "qat",
+                        "epoch": epoch + 1,
+                        "phase": phase,
+                        "ddp_world_size": world_size,
+                        **benchmark_metrics,
+                    }
+                    benchmark_history = config["output"].get(
+                        "epoch_benchmarks",
+                        str(Path(config["output"]["directory"]) / "epoch_benchmarks.json"),
+                    )
+                    append_epoch_benchmark(benchmark_history, benchmark_record)
+                    print(f"QAT epoch benchmark={benchmark_record}", flush=True)
+                rank0_print(
+                    rank,
                     f"qat_epoch={epoch + 1}/{total_epochs} phase={phase} "
-                    f"train={train_metrics} validation={val_metrics}",
-                    flush=True,
+                    f"train={train_metrics}"
+                    + (f" validation={val_metrics}" if val_metrics is not None else " validation=skipped")
+                    + (f" benchmark={benchmark_metrics}" if benchmark_metrics is not None else " benchmark=skipped"),
                 )
-                if phase == "frozen" and (not best_saved or val_metrics["map_50_95"] > best_map):
+                if val_metrics is not None and phase == "frozen" and (not best_saved or val_metrics["map_50_95"] > best_map):
                     best_map = val_metrics["map_50_95"]
                     best_saved = True
+                    best_metrics = dict(val_metrics)
+                    if benchmark_metrics is not None:
+                        best_metrics["benchmark"] = benchmark_metrics
                     save_checkpoint(
                         config["output"]["qat_best"],
                         qat_model,
                         optimizer,
                         epoch + 1,
-                        {**val_metrics, "benchmark": benchmark_metrics},
+                        best_metrics,
                         {
                             "variant": variant,
                             "backend": backend,
@@ -453,12 +473,17 @@ def main():
                         },
                     )
                     print(f"saved new QAT best: {config['output']['qat_best']}", flush=True)
+                last_metrics = {"train": train_metrics}
+                if val_metrics is not None:
+                    last_metrics.update(val_metrics)
+                if benchmark_metrics is not None:
+                    last_metrics["benchmark"] = benchmark_metrics
                 save_checkpoint(
                     config["output"]["qat_last"],
                     qat_model,
                     optimizer,
                     epoch + 1,
-                    {**val_metrics, "benchmark": benchmark_metrics},
+                    last_metrics,
                     {
                         "variant": variant,
                         "backend": backend,
