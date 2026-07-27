@@ -41,6 +41,15 @@ from pipelines.fasterrcnn_qat.quantization import (
 FEATURE_NAMES = ["p2", "p3", "p4", "p5", "p6_pool"]
 
 
+def _resolve_quantized_modules(config, metadata, variant):
+    quantized_modules = metadata.get("quantized_modules")
+    if quantized_modules == []:
+        quantized_modules = None
+    if quantized_modules is None:
+        quantized_modules = quantized_modules_for_variant(config, variant)
+    return quantized_modules
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
@@ -135,7 +144,7 @@ def load_source_model(
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
     qat_profile = resolve_qat_profile(config, metadata)
-    quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
+    quantized_modules = _resolve_quantized_modules(config, metadata, variant)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
         model = prepare_selective_qat(

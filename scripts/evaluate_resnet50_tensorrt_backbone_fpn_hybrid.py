@@ -13,6 +13,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from torchvision.models.detection.image_list import ImageList
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -34,6 +36,15 @@ ENGINE_OUTPUT_NAMES = ("p2", "p3", "p4", "p5", "p6_pool")
 MODEL_FEATURE_NAMES = ("0", "1", "2", "3", "pool")
 
 
+def _resolve_quantized_modules(config, metadata, variant):
+    quantized_modules = metadata.get("quantized_modules")
+    if quantized_modules == []:
+        quantized_modules = None
+    if quantized_modules is None:
+        quantized_modules = quantized_modules_for_variant(config, variant)
+    return quantized_modules
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
@@ -45,6 +56,8 @@ def parse_args():
     parser.add_argument("--split", choices=["val", "test"], default="test")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output")
+    parser.add_argument("--height", type=int)
+    parser.add_argument("--width", type=int)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--progress-frequency", type=int, default=10)
     return parser.parse_args()
@@ -174,9 +187,7 @@ def load_hybrid_model(config, args, device):
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
     qat_profile = resolve_qat_profile(config, metadata)
-    quantized_modules = metadata.get(
-        "quantized_modules", quantized_modules_for_variant(config, variant)
-    )
+    quantized_modules = _resolve_quantized_modules(config, metadata, variant)
     mixed_precision_policy = metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
     module_qconfig_map = None
     if mixed_precision_policy is not None:
@@ -203,20 +214,52 @@ def preprocess_batch(model, images, device):
     return image_list, original_sizes
 
 
+def preprocess_batch_fixed(model, images, targets, fixed_height, fixed_width, device):
+    image_mean = torch.tensor(model.transform.image_mean, device=device).view(-1, 1, 1)
+    image_std = torch.tensor(model.transform.image_std, device=device).view(-1, 1, 1)
+    batched = []
+    original_sizes = []
+    for image, _target in zip(images, targets):
+        image = image.to(device)
+        original_h, original_w = image.shape[-2:]
+        original_sizes.append((original_h, original_w))
+        normalized = (image - image_mean) / image_std
+        resized = F.interpolate(
+            normalized.unsqueeze(0),
+            size=(fixed_height, fixed_width),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+        batched.append(resized)
+    image_list = ImageList(torch.stack(batched, dim=0), [(fixed_height, fixed_width)] * len(batched))
+    return image_list, original_sizes
+
+
 @torch.inference_mode()
-def evaluate_hybrid_model(model, backbone_runner, loader, device, progress_frequency=10):
+def evaluate_hybrid_model(model, backbone_runner, loader, device, progress_frequency=10, fixed_height=None, fixed_width=None):
     model.eval()
     predictions, targets = [], []
     total_images = len(loader.dataset)
     processed = 0
     timings = []
-    print(
-        f"hybrid backbone-fpn evaluation started: target={total_images} images device={device} transform=model.transform(...)",
-        flush=True,
-    )
+    if fixed_height is not None and fixed_width is not None:
+        print(
+            f"hybrid backbone-fpn evaluation started: target={total_images} images device={device} fixed_shape={fixed_height}x{fixed_width}",
+            flush=True,
+        )
+    else:
+        print(
+            f"hybrid backbone-fpn evaluation started: target={total_images} images device={device} transform=model.transform(...)",
+            flush=True,
+        )
 
     for images, batch_targets in loader:
-        image_list, original_sizes = preprocess_batch(model, images, device)
+        if fixed_height is not None and fixed_width is not None:
+            image_list, original_sizes = preprocess_batch_fixed(
+                model, images, batch_targets, fixed_height, fixed_width, device
+            )
+        else:
+            image_list, original_sizes = preprocess_batch(model, images, device)
 
         t0 = time.perf_counter()
         features = backbone_runner(image_list.tensors)
@@ -254,6 +297,8 @@ def evaluate_hybrid_model(model, backbone_runner, loader, device, progress_frequ
     metrics["engine_input_shapes_seen"] = [
         list(shape) for shape in sorted(backbone_runner.shapes_seen)
     ]
+    if fixed_height is not None and fixed_width is not None:
+        metrics["engine_shape"] = [int(fixed_height), int(fixed_width)]
     print("hybrid backbone-fpn evaluation completed", flush=True)
     return metrics
 
@@ -272,12 +317,22 @@ def main():
     )
     model = load_hybrid_model(config, args, device)
     backbone_runner = TensorRTBackboneFPNRunner(args.engine)
+    compiler_cfg = config.get("quantization", {}).get("compiler", {})
+    fixed_height = args.height
+    fixed_width = args.width
+    if fixed_height is None and fixed_width is None and compiler_cfg.get("example_height") and compiler_cfg.get("example_width"):
+        fixed_height = int(compiler_cfg.get("example_height"))
+        fixed_width = int(compiler_cfg.get("example_width"))
+    elif (fixed_height is None) != (fixed_width is None):
+        raise ValueError("--height and --width must be provided together")
     metrics = evaluate_hybrid_model(
         model,
         backbone_runner,
         loader,
         device,
         progress_frequency=int(args.progress_frequency),
+        fixed_height=fixed_height,
+        fixed_width=fixed_width,
     )
 
     output = args.output or str(Path(config["output"]["directory"]) / "tensorrt_backbone_fpn_hybrid_eval.json")

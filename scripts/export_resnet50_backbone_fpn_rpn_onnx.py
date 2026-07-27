@@ -39,6 +39,15 @@ from pipelines.fasterrcnn_qat.quantization import (
 FEATURE_NAMES = ("p2", "p3", "p4", "p5", "p6_pool", "proposals")
 
 
+def _resolve_quantized_modules(config, metadata, variant):
+    quantized_modules = metadata.get("quantized_modules")
+    if quantized_modules == []:
+        quantized_modules = None
+    if quantized_modules is None:
+        quantized_modules = quantized_modules_for_variant(config, variant)
+    return quantized_modules
+
+
 class BackboneFPNRPNAdapter(nn.Module):
     def __init__(self, model: nn.Module):
         super().__init__()
@@ -134,7 +143,7 @@ def load_source_model(
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
     qat_profile = resolve_qat_profile(config, metadata)
-    quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
+    quantized_modules = _resolve_quantized_modules(config, metadata, variant)
     mixed_precision_policy = metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
     module_qconfig_map = None
     if mixed_precision_policy is not None:
