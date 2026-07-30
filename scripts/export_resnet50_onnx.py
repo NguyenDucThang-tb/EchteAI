@@ -94,6 +94,23 @@ def normalize_qdq_zero_points_for_tensorrt(onnx_path: Path):
     return touched
 
 
+def resolve_quantized_modules(metadata, config, variant):
+    """Resolve quantized module scope from checkpoint metadata or config.
+
+    Some older checkpoints serialize quantized_modules as [] instead of omitting
+    the field. Treat empty/falsey values as unspecified so the exporter can
+    fall back to the config preset for the given variant.
+    """
+    explicit = None
+    if isinstance(metadata, dict):
+        explicit = metadata.get("quantized_modules")
+
+    if explicit:
+        return explicit
+
+    return quantized_modules_for_variant(config, variant)
+
+
 def load_source_model(
     config,
     model_kind,
@@ -133,7 +150,7 @@ def load_source_model(
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
     qat_profile = resolve_qat_profile(config, metadata)
-    quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
+    quantized_modules = resolve_quantized_modules(metadata, config, variant)
     mixed_precision_policy = None if force_w8a8 else (
         metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
     )
