@@ -33,6 +33,9 @@ from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module, reso
 from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant, resolve_qat_profile
 from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 from pipelines.fasterrcnn_qat.quantization import (
+    mixed_precision_policy_from_config,
+    module_qconfig_map_from_policy,
+    policy_scope_to_quantized_modules,
     prepare_selective_qat,
     set_qat_phase,
 )
@@ -62,6 +65,7 @@ def parse_args():
     parser.add_argument("--height", type=int)
     parser.add_argument("--width", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--force-w8a8", action="store_true")
     parser.add_argument("--tensorrt-friendly-int8", action="store_true")
     parser.add_argument("--dynamic-hw", action="store_true", help="Export ONNX with dynamic height/width axes")
     return parser.parse_args()
@@ -111,6 +115,7 @@ def load_source_model(
     model_kind,
     fp32_checkpoint=None,
     qat_checkpoint=None,
+    force_w8a8=False,
     partial_fp32_checkpoint=False,
 ):
     model = build_fasterrcnn_model(config).cpu().eval()
@@ -145,6 +150,13 @@ def load_source_model(
     backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
     qat_profile = resolve_qat_profile(config, metadata)
     quantized_modules = _resolve_quantized_modules(config, metadata, variant)
+    mixed_precision_policy = None if force_w8a8 else (
+        metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
+    )
+    module_qconfig_map = None
+    if mixed_precision_policy is not None:
+        quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
+        module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
         model = prepare_selective_qat(
@@ -152,6 +164,7 @@ def load_source_model(
             variant,
             backend,
             quantized_modules=quantized_modules,
+            module_qconfig_map=module_qconfig_map,
             qconfig_profile=qat_profile,
         )
     payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
@@ -176,6 +189,7 @@ def main():
         args.model,
         fp32_checkpoint=args.fp32_checkpoint,
         qat_checkpoint=args.qat_checkpoint,
+        force_w8a8=args.force_w8a8,
         partial_fp32_checkpoint=args.partial_fp32_checkpoint,
     )
 
@@ -237,6 +251,7 @@ def main():
         "output_shapes": [list(tensor.shape) for tensor in outputs],
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
         "qat_profile": payload.get("extra", {}).get("qat_profile", resolve_qat_profile(config)) if isinstance(payload, dict) else resolve_qat_profile(config),
+        "force_w8a8": bool(args.force_w8a8),
         "tensorrt_friendly_int8": bool(args.tensorrt_friendly_int8),
         "dynamic_hw": bool(args.dynamic_hw),
         "normalized_zero_points": int(normalized_zero_points),
