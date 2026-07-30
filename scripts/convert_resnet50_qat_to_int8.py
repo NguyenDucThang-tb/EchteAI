@@ -49,6 +49,8 @@ def main():
     backend = str(args.backend or metadata.get("backend") or config["quantization"].get("backend", "x86"))
     qat_profile = resolve_qat_profile(config, metadata)
     quantized_modules = metadata.get("quantized_modules", quantized_modules_for_variant(config, variant))
+    if metadata.get("format") == "prepared_qat" and quantized_modules == []:
+        quantized_modules = None
     mixed_precision_policy = None if args.force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
     module_qconfig_map = None
     if mixed_precision_policy is not None:
@@ -84,7 +86,7 @@ def main():
             "variant": variant,
             "backend": backend,
             "format": "selective_int8",
-            "quantized_modules": quantized_modules or [],
+            "quantized_modules": quantized_modules_for_variant(config, variant) if quantized_modules is None else quantized_modules,
             "mixed_precision_policy": None if args.force_w8a8 else mixed_precision_policy,
             "qat_profile": qat_profile,
             "force_w8a8": bool(args.force_w8a8),

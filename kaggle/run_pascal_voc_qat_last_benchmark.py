@@ -91,6 +91,12 @@ def build_runtime_config(
     # This checkpoint dataset is intended to be true M3/W8A8. Disable inherited
     # HAWQ mixed precision so conversion does not try to apply 4-bit policy.
     config["quantization"]["variant"] = "M3"
+    config["quantization"]["quantized_modules"] = [
+        "backbone.resnet50",
+        "backbone.fpn",
+        "rpn.shared_conv",
+        "rpn.classification",
+    ]
     config["quantization"]["mixed_precision"]["enabled"] = False
     config["quantization"]["mixed_precision"]["policy_path"] = None
     config["quantization"]["mixed_precision"]["policy_output"] = None
