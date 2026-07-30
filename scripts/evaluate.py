@@ -20,7 +20,8 @@ def load_model(config, kind, checkpoint, device):
     if kind == "fp32":
         load_checkpoint(checkpoint, model)
         return model.to(device).eval()
-    # Reproduce the module topology before loading converted packed parameters.
+    # Reproduce the module topology before loading prepared fake-quant parameters
+    # or converted packed parameters.
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     metadata = payload.get("extra", {}) if isinstance(payload, dict) else {}
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
@@ -29,23 +30,25 @@ def load_model(config, kind, checkpoint, device):
     quantized_modules = metadata.get(
         "quantized_modules", quantized_modules_for_variant(config, variant)
     )
+    if metadata.get("format") == "prepared_qat" and quantized_modules == []:
+        quantized_modules = None
     with warnings.catch_warnings():
         # Packed INT8 weights/scales are loaded immediately below; observers are
         # intentionally empty while reconstructing the converted module topology.
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
-        model = convert_selective_qat(
-            prepare_selective_qat(
-                model, variant, backend, quantized_modules=quantized_modules, qconfig_profile=qat_profile
-            )
+        model = prepare_selective_qat(
+            model, variant, backend, quantized_modules=quantized_modules, qconfig_profile=qat_profile
         )
+        if kind == "int8":
+            model = convert_selective_qat(model)
     load_checkpoint(checkpoint, model)
-    return model.cpu().eval()
+    return model.to(device).eval() if kind == "qat" else model.cpu().eval()
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate FP32 or selective-INT8 detector")
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
-    parser.add_argument("--model", choices=["fp32", "int8"], required=True)
+    parser.add_argument("--model", choices=["fp32", "qat", "int8"], required=True)
     parser.add_argument("--checkpoint")
     parser.add_argument("--split", choices=["val", "test"], default="test")
     parser.add_argument("--limit", type=int)
@@ -58,8 +61,9 @@ def main():
     args = parse_args()
     config = load_config(args.config)
     validate_dataset_paths(config, (args.split,))
-    device = choose_device(config.get("device", "auto")) if args.model == "fp32" else choose_device("cpu")
-    checkpoint = args.checkpoint or config["output"]["fp32_best" if args.model == "fp32" else "int8_model"]
+    device = choose_device(config.get("device", "auto")) if args.model in {"fp32", "qat"} else choose_device("cpu")
+    checkpoint_key = {"fp32": "fp32_best", "qat": "qat_last", "int8": "int8_model"}[args.model]
+    checkpoint = args.checkpoint or config["output"][checkpoint_key]
     loader = build_coco_loader(config, args.split, shuffle=False, limit=args.limit)
     model = load_model(config, args.model, checkpoint, device)
     base_model = model

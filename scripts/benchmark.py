@@ -54,7 +54,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="CPU benchmark FP32 versus selective INT8")
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
     parser.add_argument("--fp32-checkpoint")
+    parser.add_argument("--qat-checkpoint")
     parser.add_argument("--int8-checkpoint")
+    parser.add_argument("--skip-int8", action="store_true")
     parser.add_argument("--output")
     return parser.parse_args()
 
@@ -70,8 +72,11 @@ def main():
     iterations = int(config.get("benchmark", {}).get("iterations", 50))
     checkpoints = {
         "fp32": args.fp32_checkpoint or config["output"]["fp32_best"],
-        "int8": args.int8_checkpoint or config["output"]["int8_model"],
     }
+    if args.qat_checkpoint:
+        checkpoints["qat"] = args.qat_checkpoint
+    if not args.skip_int8:
+        checkpoints["int8"] = args.int8_checkpoint or config["output"]["int8_model"]
     results = {}
     for kind, checkpoint in checkpoints.items():
         model = load_model(config, kind, checkpoint, torch.device("cpu"))
@@ -80,7 +85,10 @@ def main():
         results[kind]["parameters"] = int(model.logical_parameter_count)
         del model
         gc.collect()
-    results["speedup"] = results["fp32"]["latency_ms"] / results["int8"]["latency_ms"]
+    if "int8" in results:
+        results["speedup_int8_vs_fp32"] = results["fp32"]["latency_ms"] / results["int8"]["latency_ms"]
+    if "qat" in results:
+        results["speedup_qat_vs_fp32"] = results["fp32"]["latency_ms"] / results["qat"]["latency_ms"]
     output = Path(args.output or config["output"]["benchmark_json"])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(results, indent=2), encoding="utf-8")

@@ -128,6 +128,7 @@ def main() -> None:
     parser.add_argument("--voc-coco-root", default="/kaggle/working/pascal_voc_coco")
     parser.add_argument("--limit", type=int, help="Optional image limit for quick smoke tests")
     parser.add_argument("--force-w8a8", action="store_true")
+    parser.add_argument("--eval-int8", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--skip-latency", action="store_true")
     args = parser.parse_args()
@@ -186,48 +187,71 @@ def main() -> None:
     run(convert_cmd, repo)
 
     if not args.skip_eval:
-        eval_cmd = [
+        eval_qat_cmd = [
             sys.executable,
             "-u",
             "scripts/evaluate.py",
             "--config",
             str(runtime_config),
             "--model",
-            "int8",
+            "qat",
             "--checkpoint",
-            str(work_root / "selective_int8.pt"),
+            str(checkpoint_dir / "qat_last.pt"),
             "--split",
             "val",
             "--output",
-            str(work_root / "evaluation_int8.json"),
+            str(work_root / "evaluation_qat.json"),
         ]
         if args.limit:
-            eval_cmd.extend(["--limit", str(args.limit)])
-        run(eval_cmd, repo)
+            eval_qat_cmd.extend(["--limit", str(args.limit)])
+        run(eval_qat_cmd, repo)
 
-    if not args.skip_latency:
-        run(
-            [
+        if args.eval_int8:
+            eval_int8_cmd = [
                 sys.executable,
                 "-u",
-                "scripts/benchmark.py",
+                "scripts/evaluate.py",
                 "--config",
                 str(runtime_config),
-                "--fp32-checkpoint",
-                str(checkpoint_dir / "fp32_best.pt"),
-                "--int8-checkpoint",
+                "--model",
+                "int8",
+                "--checkpoint",
                 str(work_root / "selective_int8.pt"),
+                "--split",
+                "val",
                 "--output",
-                str(work_root / "benchmark_fp32_vs_int8.json"),
-            ],
-            repo,
-        )
+                str(work_root / "evaluation_int8.json"),
+            ]
+            if args.limit:
+                eval_int8_cmd.extend(["--limit", str(args.limit)])
+            run(eval_int8_cmd, repo)
+
+    if not args.skip_latency:
+        benchmark_cmd = [
+            sys.executable,
+            "-u",
+            "scripts/benchmark.py",
+            "--config",
+            str(runtime_config),
+            "--fp32-checkpoint",
+            str(checkpoint_dir / "fp32_best.pt"),
+            "--qat-checkpoint",
+            str(checkpoint_dir / "qat_last.pt"),
+            "--output",
+            str(work_root / "benchmark_fp32_vs_qat.json"),
+        ]
+        if args.eval_int8:
+            benchmark_cmd.extend(["--int8-checkpoint", str(work_root / "selective_int8.pt")])
+        else:
+            benchmark_cmd.append("--skip-int8")
+        run(benchmark_cmd, repo)
 
     outputs = {
         "runtime_config": str(runtime_config),
         "int8_checkpoint": str(work_root / "selective_int8.pt"),
-        "evaluation": str(work_root / "evaluation_int8.json"),
-        "latency_benchmark": str(work_root / "benchmark_fp32_vs_int8.json"),
+        "qat_evaluation": str(work_root / "evaluation_qat.json"),
+        "int8_evaluation": str(work_root / "evaluation_int8.json") if args.eval_int8 else None,
+        "latency_benchmark": str(work_root / "benchmark_fp32_vs_qat.json"),
     }
     print(json.dumps(outputs, indent=2))
 
