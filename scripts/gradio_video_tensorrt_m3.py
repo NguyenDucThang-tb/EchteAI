@@ -459,6 +459,9 @@ def main():
         server_name=args.server_name,
         server_port=args.server_port,
         share=args.share,
+        # Video được ghi vào work-dir của Kaggle, nằm ngoài cwd của repo.
+        # Gradio 5+ chỉ phục vụ file ngoài cwd khi đường dẫn được cho phép rõ ràng.
+        allowed_paths=[str(service.output_dir.resolve())],
     )
 
 
