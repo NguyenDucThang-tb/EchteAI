@@ -465,183 +465,28 @@ class VideoComparisonService:
         )
 
     def process_realtime(self, video_path, score_threshold, target_fps, max_frames,
-                         labels_text):
-        """Yield từng frame INT8 ngay khi xử lý xong để Gradio cập nhật trực tiếp.
-
-        Mười frame đầu chỉ dùng để đo năng lực thực tế của model trên GPU hiện
-        tại. Sau đó video được mở lại từ đầu và lấy mẫu đều theo timestamp với
-        FPS không vượt quá năng lực vừa đo hoặc giới hạn do người dùng chọn.
-        """
-        if not video_path:
-            raise gr.Error("Hãy tải một video lên trước.")
-        source = Path(video_path)
-        if not source.is_file():
-            raise gr.Error(f"Không đọc được video: {source}")
-
-        labels = [value.strip() for value in str(labels_text).split(",") if value.strip()]
-        labels = labels or DEFAULT_LABELS
-        max_frames = 0 if max_frames is None else int(max_frames)
-        max_count = None if max_frames <= 0 else max_frames
-        requested_fps = 0.0 if target_fps is None else float(target_fps)
-        torch.cuda.reset_peak_memory_stats(self.device)
-
-        # Giai đoạn 1: chạy thử đúng 10 frame liên tiếp để ước lượng throughput.
-        warmup_capture = cv2.VideoCapture(str(source))
-        if not warmup_capture.isOpened():
-            raise gr.Error(f"OpenCV không mở được video: {source}")
-        source_fps = float(warmup_capture.get(cv2.CAP_PROP_FPS) or 30.0)
-        total_source = int(warmup_capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        width = int(warmup_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(warmup_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        calibration_latencies = []
-        try:
-            for _ in range(10):
-                ok, frame = warmup_capture.read()
-                if not ok:
-                    break
-                image = to_tensor(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                _, latency_ms = self._predict_int8_m3(image)
-                calibration_latencies.append(latency_ms)
-        finally:
-            warmup_capture.release()
-        if not calibration_latencies:
-            raise gr.Error("Video không có frame hợp lệ để đo FPS.")
-
-        calibration_ms = float(np.mean(calibration_latencies))
-        measured_capacity_fps = 1000.0 / calibration_ms
-        effective_fps = min(source_fps, measured_capacity_fps)
-        if requested_fps > 0:
-            effective_fps = min(effective_fps, requested_fps)
-        effective_fps = max(effective_fps, 0.1)
-
-        # Giai đoạn 2: mở lại video từ đầu, chọn frame theo timestamp và yield
-        # ngay sau từng inference. Gradio Image sẽ đổi hình trong lúc cell chạy.
-        capture = cv2.VideoCapture(str(source))
-        if not capture.isOpened():
-            raise gr.Error(f"Không thể mở lại video sau bước đo FPS: {source}")
-        expected = int(np.ceil(total_source * effective_fps / source_fps)) if total_source else 0
-        if max_count is not None:
-            expected = min(expected, max_count) if expected else max_count
-
-        request_id = uuid.uuid4().hex[:10]
-        raw_path = self.output_dir / f"realtime_{request_id}_raw.mp4"
-        final_path = self.output_dir / f"realtime_{request_id}.mp4"
-        writer = cv2.VideoWriter(
-            str(raw_path), cv2.VideoWriter_fourcc(*"mp4v"),
-            effective_fps, (width, height),
+                         labels_text, progress=gr.Progress(track_tqdm=False)):
+        return self._process(
+            "realtime", video_path, score_threshold, 1, target_fps,
+            max_frames, labels_text, progress,
         )
-        if not writer.isOpened():
-            capture.release()
-            raise gr.Error(f"Không tạo được output video: {raw_path}")
-
-        input_index = processed = detections = 0
-        next_sample_time = 0.0
-        inference_latencies = []
-        stream_started = time.perf_counter()
-        last_rgb = None
-        try:
-            while True:
-                ok, frame = capture.read()
-                if not ok or (max_count is not None and processed >= max_count):
-                    break
-                frame_time = input_index / source_fps
-                source_frame_index = input_index
-                input_index += 1
-                if frame_time + 1e-9 < next_sample_time:
-                    continue
-                next_sample_time += 1.0 / effective_fps
-
-                image = to_tensor(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                prediction, latency_ms = self._predict_int8_m3(image)
-                rendered, count = self._draw(
-                    frame, prediction,
-                    f"INT8 M3 LIVE | source frame={source_frame_index}",
-                    latency_ms, float(score_threshold), labels,
-                )
-                writer.write(rendered)
-                inference_latencies.append(latency_ms)
-                detections += count
-
-                # Đồng bộ nhịp hiển thị với FPS đã chọn. Nếu inference chậm hơn
-                # dự kiến thì không sleep và hiển thị ngay khi frame hoàn tất.
-                due_time = stream_started + processed / effective_fps
-                remaining = due_time - time.perf_counter()
-                if remaining > 0:
-                    time.sleep(remaining)
-                processed += 1
-                last_rgb = cv2.cvtColor(rendered, cv2.COLOR_BGR2RGB)
-                current_ms = float(np.mean(inference_latencies))
-                stream_elapsed = max(time.perf_counter() - stream_started, 1e-9)
-                live_metrics = {
-                    "status": "streaming",
-                    "warmup_frames": len(calibration_latencies),
-                    "source_fps": source_fps,
-                    "measured_capacity_fps": measured_capacity_fps,
-                    "selected_fps": effective_fps,
-                    "processed_frames": processed,
-                    "expected_frames": expected or None,
-                    "source_frame_index": source_frame_index,
-                    "mean_inference_ms": current_ms,
-                    "current_inference_fps": 1000.0 / current_ms,
-                    "actual_display_fps": processed / stream_elapsed,
-                    "detections": detections,
-                }
-                # Chưa trả video file khi writer vẫn đang mở; chỉ cập nhật ảnh
-                # preview và metrics cho từng frame.
-                yield last_rgb, gr.skip(), live_metrics
-        finally:
-            capture.release()
-            writer.release()
-
-        if processed == 0:
-            raw_path.unlink(missing_ok=True)
-            raise gr.Error("Không có frame nào được xử lý.")
-        stream_elapsed = max(time.perf_counter() - stream_started, 1e-9)
-        actual_display_fps = processed / stream_elapsed
-        self._browser_mp4(raw_path, final_path)
-        mean_ms = float(np.mean(inference_latencies))
-        final_metrics = {
-            "status": "completed",
-            "warmup_frames": len(calibration_latencies),
-            "source_fps": source_fps,
-            "measured_capacity_fps": measured_capacity_fps,
-            "selected_fps": effective_fps,
-            "requested_fps_limit": requested_fps or "auto",
-            "processed_frames": processed,
-            "mean_inference_ms": mean_ms,
-            "inference_fps": 1000.0 / mean_ms,
-            "actual_display_fps": actual_display_fps,
-            "can_keep_up": actual_display_fps >= effective_fps * 0.95,
-            "detections": detections,
-            "gpu": torch.cuda.get_device_name(self.device),
-            "peak_vram_gb": torch.cuda.max_memory_allocated(self.device) / 2**30,
-            "output": str(final_path),
-        }
-        final_path.with_suffix(".json").write_text(
-            json.dumps(final_metrics, indent=2, ensure_ascii=False), encoding="utf-8",
-        )
-        yield last_rgb, str(final_path), final_metrics
 
 
 def build_demo(service: VideoComparisonService):
     with gr.Blocks(title="SeaDronesSee FP32 vs TensorRT INT8 M3") as demo:
         gr.Markdown(
             "# SeaDronesSee: FP32 PyTorch GPU vs INT8 TensorRT M3 hybrid\n"
-            "Chạy so sánh hoặc chạy riêng từng model trên GPU T4. **Realtime INT8** đo "
-            "10 frame đầu, tự chọn FPS phù hợp rồi hiện từng frame ngay khi xử lý xong. "
-            "Frame được lấy cách đều theo timestamp."
+            "Chạy so sánh hoặc chạy riêng từng model trên GPU T4. Realtime INT8 lấy mẫu "
+            "frame cách đều theo FPS mục tiêu; ví dụ video 30 FPS xuống 10 FPS lấy frame "
+            "0, 3, 6, 9..."
         )
         with gr.Row():
             input_video = gr.Video(label="Video đầu vào", sources=["upload", "webcam"], format="mp4")
             output_video = gr.Video(label="Video kết quả")
-        live_preview = gr.Image(label="Realtime INT8 — frame đang xử lý", type="numpy")
         with gr.Row():
             threshold = gr.Slider(0.05, 0.95, value=0.40, step=0.05, label="Score threshold")
             stride = gr.Slider(1, 10, value=1, step=1, label="Frame stride (chế độ thường)")
-            target_fps = gr.Slider(
-                0, 60, value=0, step=1,
-                label="Giới hạn FPS realtime (0 = tự đo và chọn tự động)",
-            )
+            target_fps = gr.Slider(1, 60, value=10, step=1, label="FPS mục tiêu (Realtime INT8)")
             max_frames = gr.Number(value=0, precision=0, label="Max frames (0 = toàn bộ)")
         labels = gr.Textbox(
             value=", ".join(DEFAULT_LABELS),
@@ -672,7 +517,7 @@ def build_demo(service: VideoComparisonService):
         realtime_button.click(
             service.process_realtime,
             inputs=[input_video, threshold, target_fps, max_frames, labels],
-            outputs=[live_preview, output_video, metrics],
+            outputs=[output_video, metrics],
         )
     return demo
 
