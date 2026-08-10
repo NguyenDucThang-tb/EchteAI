@@ -35,6 +35,11 @@ setup(
     ],
     extras_require={
         "coco": ["pycocotools"],
+        "web": [
+            "gradio>=5,<7",
+            "kagglehub>=1.0",
+            "onnxscript",
+        ],
         "pt2e": [
             "torch>=2.11,<2.13",
             "torchvision>=0.26,<0.28",
