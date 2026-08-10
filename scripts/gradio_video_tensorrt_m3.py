@@ -292,19 +292,23 @@ class VideoComparisonService:
         raw_path.unlink(missing_ok=True)
         return final_path
 
-    def process(self, video_path, score_threshold, frame_stride, max_frames,
-                labels_text, progress=gr.Progress(track_tqdm=False)):
+    def _process(self, mode, video_path, score_threshold, frame_stride, target_fps,
+                 max_frames, labels_text, progress):
         if not video_path:
             raise gr.Error("Hãy tải một video lên trước.")
         source = Path(video_path)
         if not source.is_file():
             raise gr.Error(f"Không đọc được video: {source}")
 
+        if mode not in {"comparison", "fp32", "int8", "realtime"}:
+            raise ValueError(f"Unsupported processing mode: {mode}")
+
         labels = [value.strip() for value in str(labels_text).split(",") if value.strip()]
         labels = labels or DEFAULT_LABELS
         stride = max(1, int(frame_stride))
         max_frames = 0 if max_frames is None else int(max_frames)
         max_count = None if max_frames <= 0 else max_frames
+        torch.cuda.reset_peak_memory_stats(self.device)
 
         capture = cv2.VideoCapture(str(source))
         if not capture.isOpened():
@@ -313,16 +317,25 @@ class VideoComparisonService:
         total_source = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        expected = (total_source + stride - 1) // stride if total_source else 0
+        if mode == "realtime":
+            # Lấy mẫu theo timestamp giúp khoảng cách frame đều cả khi FPS nguồn
+            # là số lẻ (29.97, 59.94...). Ví dụ 30 -> 10 FPS chọn 0,3,6,9...
+            requested_fps = float(target_fps or 10.0)
+            output_fps = min(max(requested_fps, 0.1), source_fps)
+            expected = int(np.ceil(total_source * output_fps / source_fps)) if total_source else 0
+        else:
+            output_fps = max(source_fps / stride, 1.0)
+            expected = (total_source + stride - 1) // stride if total_source else 0
         if max_count is not None:
             expected = min(expected, max_count) if expected else max_count
 
         request_id = uuid.uuid4().hex[:10]
-        raw_path = self.output_dir / f"comparison_{request_id}_raw.mp4"
-        final_path = self.output_dir / f"comparison_{request_id}.mp4"
+        raw_path = self.output_dir / f"{mode}_{request_id}_raw.mp4"
+        final_path = self.output_dir / f"{mode}_{request_id}.mp4"
+        output_width = width * 2 if mode == "comparison" else width
         writer = cv2.VideoWriter(
             str(raw_path), cv2.VideoWriter_fourcc(*"mp4v"),
-            max(source_fps / stride, 1.0), (width * 2, height),
+            output_fps, (output_width, height),
         )
         if not writer.isOpened():
             capture.release()
@@ -331,31 +344,49 @@ class VideoComparisonService:
         timings = {"fp32": [], "int8": []}
         detections = {"fp32": 0, "int8": 0}
         input_index = processed = 0
+        next_sample_time = 0.0
         try:
             while True:
                 ok, frame = capture.read()
                 if not ok or (max_count is not None and processed >= max_count):
                     break
-                if input_index % stride:
+                if mode == "realtime":
+                    frame_time = input_index / source_fps
+                    should_process = frame_time + 1e-9 >= next_sample_time
+                else:
+                    should_process = input_index % stride == 0
+                if not should_process:
                     input_index += 1
                     continue
                 input_index += 1
+                if mode == "realtime":
+                    next_sample_time += 1.0 / output_fps
+
                 image = to_tensor(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                fp32_prediction, fp32_ms = self._predict_fp32(image)
-                int8_prediction, int8_ms = self._predict_int8_m3(image)
-                left, left_count = self._draw(
-                    frame, fp32_prediction, "FP32 PyTorch CUDA", fp32_ms,
-                    float(score_threshold), labels,
-                )
-                right, right_count = self._draw(
-                    frame, int8_prediction, "INT8 TensorRT M3 hybrid", int8_ms,
-                    float(score_threshold), labels,
-                )
-                writer.write(np.concatenate([left, right], axis=1))
-                timings["fp32"].append(fp32_ms)
-                timings["int8"].append(int8_ms)
-                detections["fp32"] += left_count
-                detections["int8"] += right_count
+                panels = []
+                if mode in {"comparison", "fp32"}:
+                    fp32_prediction, fp32_ms = self._predict_fp32(image)
+                    fp32_frame, fp32_count = self._draw(
+                        frame, fp32_prediction, "FP32 PyTorch CUDA", fp32_ms,
+                        float(score_threshold), labels,
+                    )
+                    panels.append(fp32_frame)
+                    timings["fp32"].append(fp32_ms)
+                    detections["fp32"] += fp32_count
+                if mode in {"comparison", "int8", "realtime"}:
+                    int8_prediction, int8_ms = self._predict_int8_m3(image)
+                    int8_title = (
+                        f"INT8 M3 realtime @ {output_fps:.1f} FPS"
+                        if mode == "realtime" else "INT8 TensorRT M3 hybrid"
+                    )
+                    int8_frame, int8_count = self._draw(
+                        frame, int8_prediction, int8_title, int8_ms,
+                        float(score_threshold), labels,
+                    )
+                    panels.append(int8_frame)
+                    timings["int8"].append(int8_ms)
+                    detections["int8"] += int8_count
+                writer.write(np.concatenate(panels, axis=1) if len(panels) > 1 else panels[0])
                 processed += 1
                 if expected:
                     progress(min(processed / expected, 1.0), desc=f"Đang xử lý frame {processed}/{expected}")
@@ -368,56 +399,124 @@ class VideoComparisonService:
             raise gr.Error("Video không có frame hợp lệ.")
         self._browser_mp4(raw_path, final_path)
 
-        fp32_mean = float(np.mean(timings["fp32"]))
-        int8_mean = float(np.mean(timings["int8"]))
         metrics = {
+            "mode": mode,
+            "source_fps": source_fps,
             "processed_frames": processed,
-            "output_fps": max(source_fps / stride, 1.0),
+            "output_fps": output_fps,
             "score_threshold": float(score_threshold),
-            "frame_stride": stride,
-            "fp32_pytorch_cuda": {
-                "mean_latency_ms": fp32_mean,
-                "fps": 1000.0 / fp32_mean,
-                "detections": detections["fp32"],
-            },
-            "int8_tensorrt_m3_hybrid": {
-                "mean_latency_ms": int8_mean,
-                "fps": 1000.0 / int8_mean,
-                "detections": detections["int8"],
-            },
-            "speedup": fp32_mean / int8_mean,
+            "sampling": (
+                "timestamp_even_sampling" if mode == "realtime"
+                else f"fixed_stride_{stride}"
+            ),
             "gpu": torch.cuda.get_device_name(self.device),
             "peak_vram_gb": torch.cuda.max_memory_allocated(self.device) / 2**30,
         }
+        if timings["fp32"]:
+            fp32_mean = float(np.mean(timings["fp32"]))
+            metrics["fp32_pytorch_cuda"] = {
+                "mean_latency_ms": fp32_mean,
+                "fps": 1000.0 / fp32_mean,
+                "detections": detections["fp32"],
+            }
+        if timings["int8"]:
+            int8_mean = float(np.mean(timings["int8"]))
+            metrics["int8_tensorrt_m3_hybrid"] = {
+                "mean_latency_ms": int8_mean,
+                "fps": 1000.0 / int8_mean,
+                "detections": detections["int8"],
+            }
+            if mode == "realtime":
+                metrics["realtime"] = {
+                    "target_fps": output_fps,
+                    "inference_fps": 1000.0 / int8_mean,
+                    "can_keep_up": (1000.0 / int8_mean) >= output_fps,
+                    "sampling_note": (
+                        "Các frame được chọn cách đều theo timestamp; "
+                        "30 FPS -> 10 FPS tương ứng frame 0,3,6,9,..."
+                    ),
+                }
+        if timings["fp32"] and timings["int8"]:
+            metrics["speedup"] = fp32_mean / int8_mean
         final_path.with_suffix(".json").write_text(
             json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8",
         )
         return str(final_path), metrics
+
+    def process_comparison(self, video_path, score_threshold, frame_stride, max_frames,
+                           labels_text, progress=gr.Progress(track_tqdm=False)):
+        return self._process(
+            "comparison", video_path, score_threshold, frame_stride, 0,
+            max_frames, labels_text, progress,
+        )
+
+    def process_fp32(self, video_path, score_threshold, frame_stride, max_frames,
+                     labels_text, progress=gr.Progress(track_tqdm=False)):
+        return self._process(
+            "fp32", video_path, score_threshold, frame_stride, 0,
+            max_frames, labels_text, progress,
+        )
+
+    def process_int8(self, video_path, score_threshold, frame_stride, max_frames,
+                     labels_text, progress=gr.Progress(track_tqdm=False)):
+        return self._process(
+            "int8", video_path, score_threshold, frame_stride, 0,
+            max_frames, labels_text, progress,
+        )
+
+    def process_realtime(self, video_path, score_threshold, target_fps, max_frames,
+                         labels_text, progress=gr.Progress(track_tqdm=False)):
+        return self._process(
+            "realtime", video_path, score_threshold, 1, target_fps,
+            max_frames, labels_text, progress,
+        )
 
 
 def build_demo(service: VideoComparisonService):
     with gr.Blocks(title="SeaDronesSee FP32 vs TensorRT INT8 M3") as demo:
         gr.Markdown(
             "# SeaDronesSee: FP32 PyTorch GPU vs INT8 TensorRT M3 hybrid\n"
-            "Tải video lên để xem detection song song. Cả hai nhánh đều chạy trên GPU T4; "
-            "nhánh INT8 dùng TensorRT cho backbone + FPN + RPN shared/classification."
+            "Chạy so sánh hoặc chạy riêng từng model trên GPU T4. Realtime INT8 lấy mẫu "
+            "frame cách đều theo FPS mục tiêu; ví dụ video 30 FPS xuống 10 FPS lấy frame "
+            "0, 3, 6, 9..."
         )
         with gr.Row():
-            input_video = gr.Video(label="Video đầu vào", sources=["upload"], format="mp4")
-            output_video = gr.Video(label="Video kết quả: FP32 (trái) | INT8 M3 (phải)")
+            input_video = gr.Video(label="Video đầu vào", sources=["upload", "webcam"], format="mp4")
+            output_video = gr.Video(label="Video kết quả")
         with gr.Row():
             threshold = gr.Slider(0.05, 0.95, value=0.40, step=0.05, label="Score threshold")
-            stride = gr.Slider(1, 10, value=1, step=1, label="Frame stride")
+            stride = gr.Slider(1, 10, value=1, step=1, label="Frame stride (chế độ thường)")
+            target_fps = gr.Slider(1, 60, value=10, step=1, label="FPS mục tiêu (Realtime INT8)")
             max_frames = gr.Number(value=0, precision=0, label="Max frames (0 = toàn bộ)")
         labels = gr.Textbox(
             value=", ".join(DEFAULT_LABELS),
             label="Tên 5 lớp foreground (phân cách bằng dấu phẩy)",
         )
-        run_button = gr.Button("Chạy so sánh", variant="primary")
+        with gr.Row():
+            compare_button = gr.Button("So sánh FP32 | INT8", variant="primary")
+            fp32_button = gr.Button("Chạy riêng FP32")
+            int8_button = gr.Button("Chạy riêng INT8")
+            realtime_button = gr.Button("Realtime INT8", variant="stop")
         metrics = gr.JSON(label="Latency, FPS và VRAM")
-        run_button.click(
-            service.process,
-            inputs=[input_video, threshold, stride, max_frames, labels],
+        regular_inputs = [input_video, threshold, stride, max_frames, labels]
+        compare_button.click(
+            service.process_comparison,
+            inputs=regular_inputs,
+            outputs=[output_video, metrics],
+        )
+        fp32_button.click(
+            service.process_fp32,
+            inputs=regular_inputs,
+            outputs=[output_video, metrics],
+        )
+        int8_button.click(
+            service.process_int8,
+            inputs=regular_inputs,
+            outputs=[output_video, metrics],
+        )
+        realtime_button.click(
+            service.process_realtime,
+            inputs=[input_video, threshold, target_fps, max_frames, labels],
             outputs=[output_video, metrics],
         )
     return demo
