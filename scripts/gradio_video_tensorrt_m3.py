@@ -25,6 +25,7 @@ from pathlib import Path
 import cv2
 import gradio as gr
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import yaml
@@ -278,6 +279,85 @@ class VideoComparisonService:
         return canvas, kept
 
     @staticmethod
+    def _metrics_table(metrics: dict) -> pd.DataFrame:
+        rows = []
+        fp32 = metrics.get("fp32_pytorch_cuda")
+        int8 = metrics.get("int8_tensorrt_m3_hybrid")
+        if fp32:
+            rows.append([
+                "FP32 PyTorch CUDA",
+                round(float(fp32["mean_latency_ms"]), 2),
+                round(float(fp32["fps"]), 2),
+                int(fp32["detections"]),
+            ])
+        if int8:
+            rows.append([
+                "INT8 TensorRT M3 hybrid",
+                round(float(int8["mean_latency_ms"]), 2),
+                round(float(int8["fps"]), 2),
+                int(int8["detections"]),
+            ])
+        return pd.DataFrame(rows, columns=["Model", "Latency (ms)", "FPS", "Detections"])
+
+    @staticmethod
+    def _metrics_html(metrics: dict) -> str:
+        mode = metrics.get("mode", "n/a").upper()
+        gpu = metrics.get("gpu", "n/a")
+        source_fps = float(metrics.get("source_fps", 0.0))
+        processed = int(metrics.get("processed_frames", 0))
+        peak_vram = float(metrics.get("peak_vram_gb", 0.0))
+        score = float(metrics.get("score_threshold", 0.0))
+        output_fps = float(metrics.get("output_fps", 0.0))
+        fp32 = metrics.get("fp32_pytorch_cuda")
+        int8 = metrics.get("int8_tensorrt_m3_hybrid")
+        speedup = metrics.get("speedup")
+
+        def card(title: str, value: str, tint: str) -> str:
+            return (
+                f"<div style='flex:1;min-width:170px;padding:14px 16px;border-radius:16px;"
+                f"border:1px solid #e5e7eb;background:linear-gradient(180deg,#fff,{tint}14);'>"
+                f"<div style='font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;'>{title}</div>"
+                f"<div style='font-size:24px;font-weight:700;color:#111827;margin-top:6px;'>{value}</div>"
+                f"</div>"
+            )
+
+        top_cards = [
+            card("Mode", mode, "#f97316"),
+            card("GPU", gpu, "#22c55e"),
+            card("Processed", f"{processed}", "#3b82f6"),
+            card("Peak VRAM", f"{peak_vram:.2f} GB", "#a855f7"),
+            card("Output FPS", f"{output_fps:.1f}", "#06b6d4"),
+        ]
+        if speedup is not None:
+            top_cards.append(card("Speedup", f"{float(speedup):.2f}x", "#f59e0b"))
+
+        sections = [
+            "<div style='display:flex;flex-wrap:wrap;gap:12px;margin-bottom:14px;'>",
+            *top_cards,
+            "</div>",
+            "<div style='border:1px solid #e5e7eb;border-radius:16px;padding:14px 16px;background:#fff;'>",
+            "<div style='font-weight:700;font-size:16px;margin-bottom:8px;'>Thông số chính</div>",
+            "<table style='width:100%;border-collapse:collapse;font-size:14px;'>",
+            f"<tr><td style='padding:6px 0;color:#6b7280;'>Score threshold</td><td style='padding:6px 0;text-align:right;font-weight:600;'>{score:.2f}</td></tr>",
+            f"<tr><td style='padding:6px 0;color:#6b7280;'>Source FPS</td><td style='padding:6px 0;text-align:right;font-weight:600;'>{source_fps:.1f}</td></tr>",
+        ]
+        if fp32:
+            sections.extend([
+                f"<tr><td style='padding:6px 0;color:#6b7280;'>FP32 latency</td><td style='padding:6px 0;text-align:right;font-weight:600;'>{float(fp32['mean_latency_ms']):.2f} ms</td></tr>",
+                f"<tr><td style='padding:6px 0;color:#6b7280;'>FP32 FPS</td><td style='padding:6px 0;text-align:right;font-weight:600;'>{float(fp32['fps']):.2f}</td></tr>",
+            ])
+        if int8:
+            sections.extend([
+                f"<tr><td style='padding:6px 0;color:#6b7280;'>INT8 latency</td><td style='padding:6px 0;text-align:right;font-weight:600;'>{float(int8['mean_latency_ms']):.2f} ms</td></tr>",
+                f"<tr><td style='padding:6px 0;color:#6b7280;'>INT8 FPS</td><td style='padding:6px 0;text-align:right;font-weight:600;'>{float(int8['fps']):.2f}</td></tr>",
+            ])
+        sections.extend([
+            "</table>",
+            "</div>",
+        ])
+        return "".join(sections)
+
+    @staticmethod
     def _browser_mp4(raw_path: Path, final_path: Path) -> Path:
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
@@ -410,7 +490,7 @@ class VideoComparisonService:
         final_path.with_suffix(".json").write_text(
             json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8",
         )
-        return str(final_path), metrics
+        return str(final_path), self._metrics_html(metrics), self._metrics_table(metrics)
 
     def process_comparison(self, video_path, score_threshold, frame_stride, max_frames,
                            labels_text, progress=gr.Progress(track_tqdm=False)):
@@ -454,22 +534,30 @@ def build_demo(service: VideoComparisonService):
             compare_button = gr.Button("So sánh FP32 | INT8", variant="primary")
             fp32_button = gr.Button("Chạy riêng FP32")
             int8_button = gr.Button("Chạy riêng INT8")
-        metrics = gr.JSON(label="Latency, FPS và VRAM")
+        metrics_html = gr.HTML(label="Tóm tắt hiệu năng")
+        metrics_table = gr.Dataframe(
+            headers=["Model", "Latency (ms)", "FPS", "Detections"],
+            datatype=["str", "number", "number", "number"],
+            interactive=False,
+            row_count=(1, "dynamic"),
+            col_count=(4, "fixed"),
+            label="Bảng tóm tắt",
+        )
         regular_inputs = [input_video, threshold, stride, max_frames, labels]
         compare_button.click(
             service.process_comparison,
             inputs=regular_inputs,
-            outputs=[output_video, metrics],
+            outputs=[output_video, metrics_html, metrics_table],
         )
         fp32_button.click(
             service.process_fp32,
             inputs=regular_inputs,
-            outputs=[output_video, metrics],
+            outputs=[output_video, metrics_html, metrics_table],
         )
         int8_button.click(
             service.process_int8,
             inputs=regular_inputs,
-            outputs=[output_video, metrics],
+            outputs=[output_video, metrics_html, metrics_table],
         )
     return demo
 
